@@ -49,6 +49,7 @@ static int name_objects;
 #define ERROR_PACK 04
 #define ERROR_REFS 010
 #define ERROR_COMMIT_GRAPH 020
+#define ERROR_MULTI_PACK_INDEX 040
 
 static const char *describe_object(const struct object_id *oid)
 {
@@ -72,25 +73,7 @@ static const char *printable_type(const struct object_id *oid,
 
 static int fsck_config(const char *var, const char *value, void *cb)
 {
-	if (strcmp(var, "fsck.skiplist") == 0) {
-		const char *path;
-		struct strbuf sb = STRBUF_INIT;
-
-		if (git_config_pathname(&path, var, value))
-			return 1;
-		strbuf_addf(&sb, "skiplist=%s", path);
-		free((char *)path);
-		fsck_set_msg_types(&fsck_obj_options, sb.buf);
-		strbuf_release(&sb);
-		return 0;
-	}
-
-	if (skip_prefix(var, "fsck.", &var)) {
-		fsck_set_msg_type(&fsck_obj_options, var, value);
-		return 0;
-	}
-
-	return git_default_config(var, value, cb);
+	return fsck_config_internal(var, value, cb, &fsck_obj_options);
 }
 
 static int objerror(struct object *obj, const char *err)
@@ -167,7 +150,7 @@ static int mark_object(struct object *obj, int type, void *data, struct fsck_opt
 		return 0;
 
 	if (!(obj->flags & HAS_OBJ)) {
-		if (parent && !has_object_file(&obj->oid)) {
+		if (parent && !has_object(the_repository, &obj->oid, 1)) {
 			printf_ln(_("broken link from %7s %s\n"
 				    "              to %7s %s"),
 				  printable_type(&parent->oid, parent->type),
@@ -240,7 +223,7 @@ static void mark_unreachable_referents(const struct object_id *oid)
 		enum object_type type = oid_object_info(the_repository,
 							&obj->oid, NULL);
 		if (type > 0)
-			object_as_type(the_repository, obj, type, 0);
+			object_as_type(obj, type, 0);
 	}
 
 	options.walk = mark_used;
@@ -576,7 +559,7 @@ static void get_default_heads(void)
 
 	for_each_rawref(fsck_handle_ref, NULL);
 
-	worktrees = get_worktrees(0);
+	worktrees = get_worktrees();
 	for (p = worktrees; *p; p++) {
 		struct worktree *wt = *p;
 		struct strbuf ref = STRBUF_INIT;
@@ -952,7 +935,7 @@ int cmd_fsck(int argc, const char **argv, const char *prefix)
 			midx_argv[2] = "--object-dir";
 			midx_argv[3] = odb->path;
 			if (run_command(&midx_verify))
-				errors_found |= ERROR_COMMIT_GRAPH;
+				errors_found |= ERROR_MULTI_PACK_INDEX;
 		}
 	}
 

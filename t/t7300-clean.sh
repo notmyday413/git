@@ -110,7 +110,7 @@ test_expect_success 'git clean with prefix' '
 
 '
 
-test_expect_success C_LOCALE_OUTPUT 'git clean with relative prefix' '
+test_expect_success 'git clean with relative prefix' '
 
 	mkdir -p build docs &&
 	touch a.out src/part3.c docs/manual.txt obj.o build/lib.so &&
@@ -123,7 +123,7 @@ test_expect_success C_LOCALE_OUTPUT 'git clean with relative prefix' '
 	verbose test "$would_clean" = ../src/part3.c
 '
 
-test_expect_success C_LOCALE_OUTPUT 'git clean with absolute path' '
+test_expect_success 'git clean with absolute path' '
 
 	mkdir -p build docs &&
 	touch a.out src/part3.c docs/manual.txt obj.o build/lib.so &&
@@ -407,7 +407,7 @@ test_expect_success 'clean.requireForce and -f' '
 
 '
 
-test_expect_success C_LOCALE_OUTPUT 'core.excludesfile' '
+test_expect_success 'core.excludesfile' '
 
 	echo excludes >excludes &&
 	echo included >included &&
@@ -735,6 +735,15 @@ test_expect_success MINGW 'handle clean & core.longpaths = false nicely' '
 	# grepping for a strerror string is unportable but it is OK here with
 	# MINGW prereq
 	test_i18ngrep "too long" .git/err
+'
+
+test_expect_success 'clean untracked paths by pathspec' '
+	git init untracked &&
+	mkdir untracked/dir &&
+	echo >untracked/dir/file.txt &&
+	git -C untracked clean -f dir/file.txt &&
+	ls untracked/dir >actual &&
+	test_must_be_empty actual
 '
 
 test_expect_success MINGW 'clean does not traverse mount points' '

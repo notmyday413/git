@@ -19,7 +19,7 @@ CRITICAL_SECTION fscache_cs;
 struct fscache {
 	volatile long enabled;
 	struct hashmap map;
-	struct mem_pool *mem_pool;
+	struct mem_pool mem_pool;
 	unsigned int lstat_requests;
 	unsigned int opendir_requests;
 	unsigned int fscache_requests;
@@ -73,7 +73,7 @@ struct fsentry {
 
 struct heap_fsentry {
 	struct fsentry ent;
-	char dummy[MAX_PATH];
+	char dummy[MAX_LONG_PATH];
 };
 
 /*
@@ -132,7 +132,7 @@ static struct fsentry *fsentry_alloc(struct fscache *cache, struct fsentry *list
 {
 	/* overallocate fsentry and copy the name to the end */
 	struct fsentry *fse =
-		mem_pool_alloc(cache->mem_pool, sizeof(*fse) + len + 1);
+		mem_pool_alloc(&cache->mem_pool, sizeof(*fse) + len + 1);
 	/* init the rest of the structure */
 	fsentry_init(fse, list, name, len);
 	fse->next = NULL;
@@ -355,10 +355,9 @@ static void fscache_add(struct fscache *cache, struct fsentry *fse)
  */
 static void fscache_clear(struct fscache *cache)
 {
-	mem_pool_discard(cache->mem_pool, 0);
-	cache->mem_pool = NULL;
+	mem_pool_discard(&cache->mem_pool, 0);
 	mem_pool_init(&cache->mem_pool, 0);
-	hashmap_free(&cache->map);
+	hashmap_clear(&cache->map);
 	hashmap_init(&cache->map, (hashmap_cmp_fn)fsentry_cmp, NULL, 0);
 	cache->lstat_requests = cache->opendir_requests = 0;
 	cache->fscache_misses = cache->fscache_requests = 0;
@@ -534,8 +533,8 @@ void fscache_disable(void)
 			"total requests/misses %u/%u\n",
 			cache->lstat_requests, cache->opendir_requests,
 			cache->fscache_requests, cache->fscache_misses);
-		mem_pool_discard(cache->mem_pool, 0);
-		hashmap_free(&cache->map);
+		mem_pool_discard(&cache->mem_pool, 0);
+		hashmap_clear(&cache->map);
 		free(cache);
 	}
 
@@ -596,6 +595,18 @@ int fscache_lstat(const char *filename, struct stat *st)
 	fse = fscache_get(cache, &key[1].ent);
 	if (!fse)
 		return -1;
+
+	/*
+	 * Special case symbolic links: FindFirstFile()/FindNextFile() did not
+	 * provide us with the length of the target path.
+	 */
+	if (fse->u.s.st_size == MAX_LONG_PATH && S_ISLNK(fse->st_mode)) {
+		char buf[MAX_LONG_PATH];
+		int len = readlink(filename, buf, sizeof(buf) - 1);
+
+		if (len > 0)
+			fse->u.s.st_size = len;
+	}
 
 	/* copy stat data */
 	st->st_ino = 0;
@@ -754,7 +765,7 @@ void fscache_merge(struct fscache *dest)
 	while ((e = hashmap_iter_next(&iter)))
 		hashmap_add(&dest->map, e);
 
-	mem_pool_combine(dest->mem_pool, cache->mem_pool);
+	mem_pool_combine(&dest->mem_pool, &cache->mem_pool);
 
 	dest->lstat_requests += cache->lstat_requests;
 	dest->opendir_requests += cache->opendir_requests;

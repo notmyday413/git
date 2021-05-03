@@ -15,6 +15,7 @@ my @cflags = ();
 my @lflags = ();
 my $is_linking = 0;
 my $is_debug = 0;
+my $is_gui = 0;
 while (@ARGV) {
 	my $arg = shift @ARGV;
 	if ("$arg" eq "-DDEBUG") {
@@ -23,7 +24,9 @@ while (@ARGV) {
 	    # before any "-l*" flags.
 	    $is_debug = 1;
 	}
-	if ("$arg" =~ /^-[DIMGOZ]/) {
+	if ("$arg" =~ /^-I\/mingw(32|64)/) {
+		# eat
+	} elsif ("$arg" =~ /^-[DIMGOZ]/) {
 		push(@cflags, $arg);
 	} elsif ("$arg" eq "-o") {
 		my $file_out = shift @ARGV;
@@ -43,18 +46,19 @@ while (@ARGV) {
 		push(@args, "zlib.lib");
 	    }
 	} elsif ("$arg" eq "-liconv") {
-		push(@args, "libiconv.lib");
+		push(@args, "iconv.lib");
 	} elsif ("$arg" eq "-lcrypto") {
-		push(@args, "libeay32.lib");
+		push(@args, "libcrypto.lib");
 	} elsif ("$arg" eq "-lssl") {
-		push(@args, "ssleay32.lib");
+		push(@args, "libssl.lib");
 	} elsif ("$arg" eq "-lcurl") {
 		my $lib = "";
 		# Newer vcpkg definitions call this libcurl_imp.lib; Do we
 		# need to use that instead?
 		foreach my $flag (@lflags) {
 			if ($flag =~ /^-LIBPATH:(.*)/) {
-				foreach my $l ("libcurl_imp.lib", "libcurl.lib") {
+				my $libcurl = $is_debug ? "libcurl-d.lib" : "libcurl.lib";
+				foreach my $l ("libcurl_imp.lib", $libcurl) {
 					if (-f "$1/$l") {
 						$lib = $l;
 						last;
@@ -64,7 +68,11 @@ while (@ARGV) {
 		}
 		push(@args, $lib);
 	} elsif ("$arg" eq "-lexpat") {
-		push(@args, "expat.lib");
+	    if ($is_debug) {
+		push(@args, "libexpatd.lib");
+	    } else {
+		push(@args, "libexpat.lib");
+	    }
 	} elsif ("$arg" =~ /^-L/ && "$arg" ne "-LTCG") {
 		$arg =~ s/^-L/-LIBPATH:/;
 		push(@lflags, $arg);
@@ -116,11 +124,23 @@ while (@ARGV) {
 		push(@cflags, "-wd4996");
 	} elsif ("$arg" =~ /^-W[a-z]/) {
 		# let's ignore those
+	} elsif ("$arg" eq "-fno-stack-protector") {
+		# eat this
+	} elsif ("$arg" eq "-mwindows") {
+		$is_gui = 1;
 	} else {
 		push(@args, $arg);
 	}
 }
 if ($is_linking) {
+	if ($is_gui) {
+		push(@args, "-ENTRY:wWinMainCRTStartup");
+		push(@args, "-SUBSYSTEM:WINDOWS");
+	} else {
+		push(@args, "-ENTRY:wmainCRTStartup");
+		push(@args, "-SUBSYSTEM:CONSOLE");
+	}
+
 	push(@args, @lflags);
 	unshift(@args, "link.exe");
 } else {

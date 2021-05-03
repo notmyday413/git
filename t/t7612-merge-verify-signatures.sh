@@ -1,6 +1,9 @@
 #!/bin/sh
 
 test_description='merge signature verification tests'
+GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
+export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
+
 . ./test-lib.sh
 . "$TEST_DIRECTORY/lib-gpg.sh"
 
@@ -31,7 +34,7 @@ test_expect_success GPG 'create signed commits' '
 	echo 3 >baz && git add baz &&
 	test_tick && git commit -SB7227189 -m "untrusted on side" &&
 
-	git checkout master
+	git checkout main
 '
 
 test_expect_success GPG 'merge unsigned commit with verification' '
@@ -66,9 +69,31 @@ test_expect_success GPG 'merge commit with untrusted signature with verification
 	test_i18ngrep "has an untrusted GPG signature" mergeerror
 '
 
+test_expect_success GPG 'merge commit with untrusted signature with verification and high minTrustLevel' '
+	test_when_finished "git reset --hard && git checkout initial" &&
+	test_config gpg.minTrustLevel marginal &&
+	test_must_fail git merge --ff-only --verify-signatures side-untrusted 2>mergeerror &&
+	test_i18ngrep "has an untrusted GPG signature" mergeerror
+'
+
+test_expect_success GPG 'merge commit with untrusted signature with verification and low minTrustLevel' '
+	test_when_finished "git reset --hard && git checkout initial" &&
+	test_config gpg.minTrustLevel undefined &&
+	git merge --ff-only --verify-signatures side-untrusted >mergeoutput &&
+	test_i18ngrep "has a good GPG signature" mergeoutput
+'
+
 test_expect_success GPG 'merge commit with untrusted signature with merge.verifySignatures=true' '
 	test_when_finished "git reset --hard && git checkout initial" &&
 	test_config merge.verifySignatures true &&
+	test_must_fail git merge --ff-only side-untrusted 2>mergeerror &&
+	test_i18ngrep "has an untrusted GPG signature" mergeerror
+'
+
+test_expect_success GPG 'merge commit with untrusted signature with merge.verifySignatures=true and minTrustLevel' '
+	test_when_finished "git reset --hard && git checkout initial" &&
+	test_config merge.verifySignatures true &&
+	test_config gpg.minTrustLevel marginal &&
 	test_must_fail git merge --ff-only side-untrusted 2>mergeerror &&
 	test_i18ngrep "has an untrusted GPG signature" mergeerror
 '

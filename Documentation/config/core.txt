@@ -66,7 +66,45 @@ core.fsmonitor::
 	will identify all files that may have changed since the
 	requested date/time. This information is used to speed up git by
 	avoiding unnecessary processing of files that have not changed.
-	See the "fsmonitor-watchman" section of linkgit:githooks[5].
++
+See the "fsmonitor-watchman" section of linkgit:githooks[5].
++
+Note: FSMonitor hooks (and this config setting) are ignored if the
+(experimental) built-in FSMonitor is enabled (see
+`core.useBuiltinFSMonitor`).
+
+core.fsmonitorHookVersion::
+	Sets the version of hook that is to be used when calling the
+	FSMonitor hook (as configured via `core.fsmonitor`).
++
+There are currently versions 1 and 2. When this is not set,
+version 2 will be tried first and if it fails then version 1
+will be tried. Version 1 uses a timestamp as input to determine
+which files have changes since that time but some monitors
+like watchman have race conditions when used with a timestamp.
+Version 2 uses an opaque string so that the monitor can return
+something that can be used to determine what files have changed
+without race conditions.
++
+Note: FSMonitor hooks (and this config setting) are ignored if the
+built-in FSMonitor is enabled (see `core.useBuiltinFSMonitor`).
+
+core.useBuiltinFSMonitor::
+	(EXPERIMENTAL) If set to true, enable the built-in filesystem
+	event watcher (for technical details, see
+	linkgit:git-fsmonitor--daemon[1]).
++
+Like external (hook-based) FSMonitors, the built-in FSMonitor can speed up
+Git commands that need to refresh the Git index (e.g. `git status`) in a
+worktree with many files. The built-in FSMonitor facility eliminates the
+need to install and maintain an external third-party monitoring tool.
++
+The built-in FSMonitor is currently available only on a limited set of
+supported platforms.
++
+Note: if this config setting is set to `true`, any FSMonitor hook
+configured via `core.fsmonitor` (and possibly `core.fsmonitorHookVersion`)
+is ignored.
 
 core.trustctime::
 	If false, the ctime differences between the index and the
@@ -388,7 +426,7 @@ the largest projects.  You probably do not need to adjust this value.
 Common unit suffixes of 'k', 'm', or 'g' are supported.
 
 core.deltaBaseCacheLimit::
-	Maximum number of bytes to reserve for caching base objects
+	Maximum number of bytes per thread to reserve for caching base objects
 	that may be referenced by multiple deltified objects.  By storing the
 	entire decompressed base objects in a cache Git is able
 	to avoid unpacking and decompressing frequently used base
@@ -608,8 +646,8 @@ core.useReplaceRefs::
 
 core.multiPackIndex::
 	Use the multi-pack-index file to track multiple packfiles using a
-	single index. See link:technical/multi-pack-index.html[the
-	multi-pack-index design document].
+	single index. See linkgit:git-multi-pack-index[1] for more
+	information. Defaults to true.
 
 core.sparseCheckout::
 	Enable "sparse checkout" feature. See linkgit:git-sparse-checkout[1]
@@ -627,4 +665,6 @@ core.abbrev::
 	computed based on the approximate number of packed objects
 	in your repository, which hopefully is enough for
 	abbreviated object names to stay unique for some time.
+	If set to "no", no abbreviation is made and the object names
+	are shown in their full length.
 	The minimum length is 4.

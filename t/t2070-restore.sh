@@ -2,6 +2,9 @@
 
 test_description='restore basic functionality'
 
+GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
+export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
+
 . ./test-lib.sh
 
 test_expect_success 'setup' '
@@ -15,7 +18,7 @@ test_expect_success 'setup' '
 	echo ignored >ignored &&
 	echo /ignored >.gitignore &&
 	git add one two .gitignore &&
-	git update-ref refs/heads/one master
+	git update-ref refs/heads/one main
 '
 
 test_expect_success 'restore without pathspec is not ok' '
@@ -69,6 +72,17 @@ test_expect_success 'restore --staged uses HEAD as source' '
 	test_cmp expected actual
 '
 
+test_expect_success 'restore --worktree --staged uses HEAD as source' '
+	test_when_finished git reset --hard &&
+	git show HEAD:./first.t >expected &&
+	echo dirty >>first.t &&
+	git add first.t &&
+	git restore --worktree --staged first.t &&
+	git show :./first.t >actual &&
+	test_cmp expected actual &&
+	test_cmp expected first.t
+'
+
 test_expect_success 'restore --ignore-unmerged ignores unmerged entries' '
 	git init unmerged &&
 	(
@@ -80,7 +94,7 @@ test_expect_success 'restore --ignore-unmerged ignores unmerged entries' '
 		git switch -c first &&
 		echo first >unmerged &&
 		git commit -am first &&
-		git switch -c second master &&
+		git switch -c second main &&
 		echo second >unmerged &&
 		git commit -am second &&
 		test_must_fail git merge first &&
@@ -104,6 +118,23 @@ test_expect_success 'restore --staged adds deleted intent-to-add file back to in
 	git add -N nonempty empty &&
 	git restore --staged nonempty empty &&
 	git diff --cached --exit-code
+'
+
+test_expect_success 'restore --staged invalidates cache tree for deletions' '
+	test_when_finished git reset --hard &&
+	>new1 &&
+	>new2 &&
+	git add new1 new2 &&
+
+	# It is important to commit and then reset here, so that the index
+	# contains a valid cache-tree for the "both" tree.
+	git commit -m both &&
+	git reset --soft HEAD^ &&
+
+	git restore --staged new1 &&
+	git commit -m "just new2" &&
+	git rev-parse HEAD:new2 &&
+	test_must_fail git rev-parse HEAD:new1
 '
 
 test_done

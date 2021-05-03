@@ -4,7 +4,7 @@
 #include "color.h"
 #include "graph.h"
 #include "revision.h"
-#include "argv-array.h"
+#include "strvec.h"
 
 /* Internal API */
 
@@ -82,7 +82,7 @@ static void graph_show_line_prefix(const struct diff_options *diffopt)
 static const char **column_colors;
 static unsigned short column_colors_max;
 
-static void parse_graph_colors_config(struct argv_array *colors, const char *string)
+static void parse_graph_colors_config(struct strvec *colors, const char *string)
 {
 	const char *end, *start;
 
@@ -93,13 +93,13 @@ static void parse_graph_colors_config(struct argv_array *colors, const char *str
 		char color[COLOR_MAXLEN];
 
 		if (!color_parse_mem(start, comma - start, color))
-			argv_array_push(colors, color);
+			strvec_push(colors, color);
 		else
 			warning(_("ignore invalid color '%.*s' in log.graphColors"),
 				(int)(comma - start), start);
 		start = comma + 1;
 	}
-	argv_array_push(colors, GIT_COLOR_RESET);
+	strvec_push(colors, GIT_COLOR_RESET);
 }
 
 void graph_set_column_colors(const char **colors, unsigned short colors_max)
@@ -350,13 +350,13 @@ struct git_graph *graph_init(struct rev_info *opt)
 			graph_set_column_colors(column_colors_ansi,
 						column_colors_ansi_max);
 		} else {
-			static struct argv_array custom_colors = ARGV_ARRAY_INIT;
-			argv_array_clear(&custom_colors);
+			static struct strvec custom_colors = STRVEC_INIT;
+			strvec_clear(&custom_colors);
 			parse_graph_colors_config(&custom_colors, string);
 			free(string);
 			/* graph_set_column_colors takes a max-index, not a count */
-			graph_set_column_colors(custom_colors.argv,
-						custom_colors.argc - 1);
+			graph_set_column_colors(custom_colors.v,
+						custom_colors.nr - 1);
 		}
 	}
 
@@ -1055,7 +1055,7 @@ static void graph_output_commit_line(struct git_graph *graph, struct graph_line 
 		graph_update_state(graph, GRAPH_COLLAPSING);
 }
 
-const char merge_chars[] = {'/', '|', '\\'};
+static const char merge_chars[] = {'/', '|', '\\'};
 
 static void graph_output_post_merge_line(struct git_graph *graph, struct graph_line *line)
 {
@@ -1063,7 +1063,7 @@ static void graph_output_post_merge_line(struct git_graph *graph, struct graph_l
 	int i, j;
 
 	struct commit_list *first_parent = first_interesting_parent(graph);
-	int seen_parent = 0;
+	struct column *parent_col = NULL;
 
 	/*
 	 * Output the post-merge row
@@ -1117,12 +1117,17 @@ static void graph_output_post_merge_line(struct git_graph *graph, struct graph_l
 			graph_line_addch(line, ' ');
 		} else {
 			graph_line_write_column(line, col, '|');
-			if (graph->merge_layout != 0 || i != graph->commit_index - 1)
-				graph_line_addch(line, seen_parent ? '_' : ' ');
+			if (graph->merge_layout != 0 || i != graph->commit_index - 1) {
+				if (parent_col)
+					graph_line_write_column(
+						line, parent_col, '_');
+				else
+					graph_line_addch(line, ' ');
+			}
 		}
 
 		if (col_commit == first_parent->item)
-			seen_parent = 1;
+			parent_col = col;
 	}
 
 	/*
@@ -1219,21 +1224,23 @@ static void graph_output_collapsing_line(struct git_graph *graph, struct graph_l
 			 *
 			 * The space just to the left of this
 			 * branch should always be empty.
-			 *
-			 * The branch to the left of that space
-			 * should be our eventual target.
 			 */
 			assert(graph->mapping[i - 1] > target);
 			assert(graph->mapping[i - 2] < 0);
-			assert(graph->mapping[i - 3] == target);
 			graph->mapping[i - 2] = target;
 			/*
 			 * Mark this branch as the horizontal edge to
 			 * prevent any other edges from moving
 			 * horizontally.
 			 */
-			if (horizontal_edge == -1)
-				horizontal_edge = i;
+			if (horizontal_edge == -1) {
+				int j;
+				horizontal_edge_target = target;
+				horizontal_edge = i - 1;
+
+				for (j = (target * 2) + 3; j < (i - 2); j += 2)
+					graph->mapping[j] = target;
+			}
 		}
 	}
 

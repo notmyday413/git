@@ -7,7 +7,7 @@
 #include "packfile.h"
 #include "delta.h"
 #include "streaming.h"
-#include "sha1-lookup.h"
+#include "hash-lookup.h"
 #include "commit.h"
 #include "object.h"
 #include "tag.h"
@@ -148,7 +148,7 @@ int load_idx(const char *path, const unsigned int hashsz, void *idx_map,
 		 *  - hash of the packfile
 		 *  - file checksum
 		 */
-		if (idx_size != 4 * 256 + nr * (hashsz + 4) + hashsz + hashsz)
+		if (idx_size != st_add(4 * 256 + hashsz + hashsz, st_mult(nr, hashsz + 4)))
 			return error("wrong index v1 file size in %s", path);
 	} else if (version == 2) {
 		/*
@@ -164,10 +164,10 @@ int load_idx(const char *path, const unsigned int hashsz, void *idx_map,
 		 * variable sized table containing 8-byte entries
 		 * for offsets larger than 2^31.
 		 */
-		unsigned long min_size = 8 + 4*256 + nr*(hashsz + 4 + 4) + hashsz + hashsz;
-		unsigned long max_size = min_size;
+		size_t min_size = st_add(8 + 4*256 + hashsz + hashsz, st_mult(nr, hashsz + 4 + 4));
+		size_t max_size = min_size;
 		if (nr)
-			max_size += (nr - 1)*8;
+			max_size = st_add(max_size, st_mult(nr - 1, 8));
 		if (idx_size < min_size || idx_size > max_size)
 			return error("wrong index v2 file size in %s", path);
 		if (idx_size != min_size &&
@@ -178,6 +178,7 @@ int load_idx(const char *path, const unsigned int hashsz, void *idx_map,
 		     */
 		    (sizeof(off_t) <= 4))
 			return error("pack too large for current definition of off_t in %s", path);
+		p->crc_offset = 8 + 4 * 256 + nr * hashsz;
 	}
 
 	p->index_version = version;
@@ -323,11 +324,21 @@ void close_pack_index(struct packed_git *p)
 	}
 }
 
+void close_pack_revindex(struct packed_git *p) {
+	if (!p->revindex_map)
+		return;
+
+	munmap((void *)p->revindex_map, p->revindex_size);
+	p->revindex_map = NULL;
+	p->revindex_data = NULL;
+}
+
 void close_pack(struct packed_git *p)
 {
 	close_pack_windows(p);
 	close_pack_fd(p);
 	close_pack_index(p);
+	close_pack_revindex(p);
 }
 
 void close_object_store(struct raw_object_store *o)
@@ -350,7 +361,7 @@ void close_object_store(struct raw_object_store *o)
 
 void unlink_pack_path(const char *pack_name, int force_delete)
 {
-	static const char *exts[] = {".pack", ".idx", ".keep", ".bitmap", ".promisor"};
+	static const char *exts[] = {".pack", ".idx", ".rev", ".keep", ".bitmap", ".promisor"};
 	int i;
 	struct strbuf buf = STRBUF_INIT;
 	size_t plen;
@@ -510,23 +521,11 @@ static int open_packed_git_1(struct packed_git *p)
 	struct pack_header hdr;
 	unsigned char hash[GIT_MAX_RAWSZ];
 	unsigned char *idx_hash;
-	long fd_flag;
 	ssize_t read_result;
 	const unsigned hashsz = the_hash_algo->rawsz;
 
-	if (!p->index_data) {
-		struct multi_pack_index *m;
-		const char *pack_name = pack_basename(p);
-
-		for (m = the_repository->objects->multi_pack_index;
-		     m; m = m->next) {
-			if (midx_contains_pack(m, pack_name))
-				break;
-		}
-
-		if (!m && open_pack_index(p))
-			return error("packfile %s index unavailable", p->pack_name);
-	}
+	if (open_pack_index(p))
+		return error("packfile %s index unavailable", p->pack_name);
 
 	if (!pack_max_fds) {
 		unsigned int max_fds = get_max_fd_limit();
@@ -554,16 +553,6 @@ static int open_packed_git_1(struct packed_git *p)
 	} else if (p->pack_size != st.st_size)
 		return error("packfile %s size changed", p->pack_name);
 
-	/* We leave these file descriptors open with sliding mmap;
-	 * there is no point keeping them open across exec(), though.
-	 */
-	fd_flag = fcntl(p->pack_fd, F_GETFD, 0);
-	if (fd_flag < 0)
-		return error("cannot determine file descriptor flags");
-	fd_flag |= FD_CLOEXEC;
-	if (fcntl(p->pack_fd, F_SETFD, fd_flag) == -1)
-		return error("cannot set FD_CLOEXEC");
-
 	/* Verify we recognize this pack file format. */
 	read_result = read_in_full(p->pack_fd, &hdr, sizeof(hdr));
 	if (read_result < 0)
@@ -577,19 +566,14 @@ static int open_packed_git_1(struct packed_git *p)
 			" supported (try upgrading GIT to a newer version)",
 			p->pack_name, ntohl(hdr.hdr_version));
 
-	/* Skip index checking if in multi-pack-index */
-	if (!p->index_data)
-		return 0;
-
 	/* Verify the pack matches its index. */
 	if (p->num_objects != ntohl(hdr.hdr_entries))
 		return error("packfile %s claims to have %"PRIu32" objects"
 			     " while index indicates %"PRIu32" objects",
 			     p->pack_name, ntohl(hdr.hdr_entries),
 			     p->num_objects);
-	if (lseek(p->pack_fd, p->pack_size - hashsz, SEEK_SET) == -1)
-		return error("end of packfile %s is unavailable", p->pack_name);
-	read_result = read_in_full(p->pack_fd, hash, hashsz);
+	read_result = pread_in_full(p->pack_fd, hash, hashsz,
+					p->pack_size - hashsz);
 	if (read_result < 0)
 		return error_errno("error reading from %s", p->pack_name);
 	if (read_result != hashsz)
@@ -654,7 +638,7 @@ unsigned char *use_pack(struct packed_git *p,
 			if (p->pack_fd == -1 && open_packed_git(p))
 				die("packfile %s cannot be accessed", p->pack_name);
 
-			win = xcalloc(1, sizeof(*win));
+			CALLOC_ARRAY(win, 1);
 			win->offset = (offset / window_align) * window_align;
 			len = p->pack_size - win->offset;
 			if (len > packed_git_window_size)
@@ -879,6 +863,7 @@ static void prepare_pack(const char *full_name, size_t full_name_len,
 	if (!strcmp(file_name, "multi-pack-index"))
 		return;
 	if (ends_with(file_name, ".idx") ||
+	    ends_with(file_name, ".rev") ||
 	    ends_with(file_name, ".pack") ||
 	    ends_with(file_name, ".bitmap") ||
 	    ends_with(file_name, ".keep") ||
@@ -934,6 +919,7 @@ unsigned long repo_approximate_object_count(struct repository *r)
 			count += p->num_objects;
 		}
 		r->objects->approximate_object_count = count;
+		r->objects->approximate_object_count_valid = 1;
 	}
 	return r->objects->approximate_object_count;
 }
@@ -1016,12 +1002,14 @@ void reprepare_packed_git(struct repository *r)
 {
 	struct object_directory *odb;
 
+	obj_read_lock();
 	for (odb = r->objects->odb; odb; odb = odb->next)
 		odb_clear_loose_cache(odb);
 
 	r->objects->approximate_object_count_valid = 0;
 	r->objects->packed_git_initialized = 0;
 	prepare_packed_git(r);
+	obj_read_unlock();
 }
 
 struct packed_git *get_packed_git(struct repository *r)
@@ -1034,6 +1022,17 @@ struct multi_pack_index *get_multi_pack_index(struct repository *r)
 {
 	prepare_packed_git(r);
 	return r->objects->multi_pack_index;
+}
+
+struct multi_pack_index *get_local_multi_pack_index(struct repository *r)
+{
+	struct multi_pack_index *m = get_multi_pack_index(r);
+
+	/* no need to iterate; we always put the local one first (if any) */
+	if (m && m->local)
+		return m;
+
+	return NULL;
 }
 
 struct packed_git *get_all_packs(struct repository *r)
@@ -1098,7 +1097,23 @@ unsigned long get_size_from_delta(struct packed_git *p,
 	do {
 		in = use_pack(p, w_curs, curpos, &stream.avail_in);
 		stream.next_in = in;
+		/*
+		 * Note: the window section returned by use_pack() must be
+		 * available throughout git_inflate()'s unlocked execution. To
+		 * ensure no other thread will modify the window in the
+		 * meantime, we rely on the packed_window.inuse_cnt. This
+		 * counter is incremented before window reading and checked
+		 * before window disposal.
+		 *
+		 * Other worrying sections could be the call to close_pack_fd(),
+		 * which can close packs even with in-use windows, and to
+		 * reprepare_packed_git(). Regarding the former, mmap doc says:
+		 * "closing the file descriptor does not unmap the region". And
+		 * for the latter, it won't re-open already available packs.
+		 */
+		obj_read_unlock();
 		st = git_inflate(&stream, Z_FINISH);
+		obj_read_lock();
 		curpos += stream.next_in - in;
 	} while ((st == Z_OK || st == Z_BUF_ERROR) &&
 		 stream.total_out < sizeof(delta_head));
@@ -1174,11 +1189,11 @@ const struct packed_git *has_packed_and_bad(struct repository *r,
 	return NULL;
 }
 
-static off_t get_delta_base(struct packed_git *p,
-				    struct pack_window **w_curs,
-				    off_t *curpos,
-				    enum object_type type,
-				    off_t delta_obj_offset)
+off_t get_delta_base(struct packed_git *p,
+		     struct pack_window **w_curs,
+		     off_t *curpos,
+		     enum object_type type,
+		     off_t delta_obj_offset)
 {
 	unsigned char *base_info = use_pack(p, w_curs, *curpos, NULL);
 	off_t base_offset;
@@ -1219,30 +1234,32 @@ static off_t get_delta_base(struct packed_git *p,
  * the final object lookup), but more expensive for OFS deltas (we
  * have to load the revidx to convert the offset back into a sha1).
  */
-static const unsigned char *get_delta_base_sha1(struct packed_git *p,
-						struct pack_window **w_curs,
-						off_t curpos,
-						enum object_type type,
-						off_t delta_obj_offset)
+static int get_delta_base_oid(struct packed_git *p,
+			      struct pack_window **w_curs,
+			      off_t curpos,
+			      struct object_id *oid,
+			      enum object_type type,
+			      off_t delta_obj_offset)
 {
 	if (type == OBJ_REF_DELTA) {
 		unsigned char *base = use_pack(p, w_curs, curpos, NULL);
-		return base;
+		oidread(oid, base);
+		return 0;
 	} else if (type == OBJ_OFS_DELTA) {
-		struct revindex_entry *revidx;
+		uint32_t base_pos;
 		off_t base_offset = get_delta_base(p, w_curs, &curpos,
 						   type, delta_obj_offset);
 
 		if (!base_offset)
-			return NULL;
+			return -1;
 
-		revidx = find_pack_revindex(p, base_offset);
-		if (!revidx)
-			return NULL;
+		if (offset_to_pack_pos(p, base_offset, &base_pos) < 0)
+			return -1;
 
-		return nth_packed_object_sha1(p, revidx->nr);
+		return nth_packed_object_id(oid, p,
+					    pack_pos_to_index(p, base_pos));
 	} else
-		return NULL;
+		return -1;
 }
 
 static int retry_bad_packed_offset(struct repository *r,
@@ -1250,12 +1267,11 @@ static int retry_bad_packed_offset(struct repository *r,
 				   off_t obj_offset)
 {
 	int type;
-	struct revindex_entry *revidx;
+	uint32_t pos;
 	struct object_id oid;
-	revidx = find_pack_revindex(p, obj_offset);
-	if (!revidx)
+	if (offset_to_pack_pos(p, obj_offset, &pos) < 0)
 		return OBJ_BAD;
-	nth_packed_object_oid(&oid, p, revidx->nr);
+	nth_packed_object_id(&oid, p, pack_pos_to_index(p, pos));
 	mark_bad_packed_object(p, oid.hash);
 	type = oid_object_info(r, &oid, NULL);
 	if (type <= OBJ_NONE)
@@ -1454,8 +1470,18 @@ void clear_delta_base_cache(void)
 static void add_delta_base_cache(struct packed_git *p, off_t base_offset,
 	void *base, unsigned long base_size, enum object_type type)
 {
-	struct delta_base_cache_entry *ent = xmalloc(sizeof(*ent));
+	struct delta_base_cache_entry *ent;
 	struct list_head *lru, *tmp;
+
+	/*
+	 * Check required to avoid redundant entries when more than one thread
+	 * is unpacking the same object, in unpack_entry() (since its phases I
+	 * and III might run concurrently across multiple threads).
+	 */
+	if (in_delta_base_cache(p, base_offset)) {
+		free(base);
+		return;
+	}
 
 	delta_base_cached += base_size;
 
@@ -1467,6 +1493,7 @@ static void add_delta_base_cache(struct packed_git *p, off_t base_offset,
 		release_delta_base_cache(f);
 	}
 
+	ent = xmalloc(sizeof(*ent));
 	ent->key.p = p;
 	ent->key.base_offset = base_offset;
 	ent->type = type;
@@ -1521,8 +1548,15 @@ int packed_object_info(struct repository *r, struct packed_git *p,
 	}
 
 	if (oi->disk_sizep) {
-		struct revindex_entry *revidx = find_pack_revindex(p, obj_offset);
-		*oi->disk_sizep = revidx[1].offset - obj_offset;
+		uint32_t pos;
+		if (offset_to_pack_pos(p, obj_offset, &pos) < 0) {
+			error("could not find object at offset %"PRIuMAX" "
+			      "in pack %s", (uintmax_t)obj_offset, p->pack_name);
+			type = OBJ_BAD;
+			goto out;
+		}
+
+		*oi->disk_sizep = pack_pos_to_offset(p, pos + 1) - obj_offset;
 	}
 
 	if (oi->typep || oi->type_name) {
@@ -1542,20 +1576,16 @@ int packed_object_info(struct repository *r, struct packed_git *p,
 		}
 	}
 
-	if (oi->delta_base_sha1) {
+	if (oi->delta_base_oid) {
 		if (type == OBJ_OFS_DELTA || type == OBJ_REF_DELTA) {
-			const unsigned char *base;
-
-			base = get_delta_base_sha1(p, &w_curs, curpos,
-						   type, obj_offset);
-			if (!base) {
+			if (get_delta_base_oid(p, &w_curs, curpos,
+					       oi->delta_base_oid,
+					       type, obj_offset) < 0) {
 				type = OBJ_BAD;
 				goto out;
 			}
-
-			hashcpy(oi->delta_base_sha1, base);
 		} else
-			hashclr(oi->delta_base_sha1);
+			oidclr(oi->delta_base_oid);
 	}
 
 	oi->whence = in_delta_base_cache(p, obj_offset) ? OI_DBCACHED :
@@ -1586,7 +1616,15 @@ static void *unpack_compressed_entry(struct packed_git *p,
 	do {
 		in = use_pack(p, w_curs, curpos, &stream.avail_in);
 		stream.next_in = in;
+		/*
+		 * Note: we must ensure the window section returned by
+		 * use_pack() will be available throughout git_inflate()'s
+		 * unlocked execution. Please refer to the comment at
+		 * get_size_from_delta() to see how this is done.
+		 */
+		obj_read_unlock();
 		st = git_inflate(&stream, Z_FINISH);
+		obj_read_lock();
 		if (!stream.avail_out)
 			break; /* the payload is larger than it should be */
 		curpos += stream.next_in - in;
@@ -1667,11 +1705,21 @@ void *unpack_entry(struct repository *r, struct packed_git *p, off_t obj_offset,
 		}
 
 		if (do_check_packed_object_crc && p->index_version > 1) {
-			struct revindex_entry *revidx = find_pack_revindex(p, obj_offset);
-			off_t len = revidx[1].offset - obj_offset;
-			if (check_pack_crc(p, &w_curs, obj_offset, len, revidx->nr)) {
+			uint32_t pack_pos, index_pos;
+			off_t len;
+
+			if (offset_to_pack_pos(p, obj_offset, &pack_pos) < 0) {
+				error("could not find object at offset %"PRIuMAX" in pack %s",
+				      (uintmax_t)obj_offset, p->pack_name);
+				data = NULL;
+				goto out;
+			}
+
+			len = pack_pos_to_offset(p, pack_pos + 1) - obj_offset;
+			index_pos = pack_pos_to_index(p, pack_pos);
+			if (check_pack_crc(p, &w_curs, obj_offset, len, index_pos)) {
 				struct object_id oid;
-				nth_packed_object_oid(&oid, p, revidx->nr);
+				nth_packed_object_id(&oid, p, index_pos);
 				error("bad packed object CRC for %s",
 				      oid_to_hex(&oid));
 				mark_bad_packed_object(p, oid.hash);
@@ -1743,11 +1791,9 @@ void *unpack_entry(struct repository *r, struct packed_git *p, off_t obj_offset,
 		void *external_base = NULL;
 		unsigned long delta_size, base_size = size;
 		int i;
+		off_t base_obj_offset = obj_offset;
 
 		data = NULL;
-
-		if (base)
-			add_delta_base_cache(p, obj_offset, base, base_size, type);
 
 		if (!base) {
 			/*
@@ -1756,11 +1802,11 @@ void *unpack_entry(struct repository *r, struct packed_git *p, off_t obj_offset,
 			 * This is costly but should happen only in the presence
 			 * of a corrupted pack, and is better than failing outright.
 			 */
-			struct revindex_entry *revidx;
+			uint32_t pos;
 			struct object_id base_oid;
-			revidx = find_pack_revindex(p, obj_offset);
-			if (revidx) {
-				nth_packed_object_oid(&base_oid, p, revidx->nr);
+			if (!(offset_to_pack_pos(p, obj_offset, &pos))) {
+				nth_packed_object_id(&base_oid, p,
+						     pack_pos_to_index(p, pos));
 				error("failed to read delta base object %s"
 				      " at offset %"PRIuMAX" from %s",
 				      oid_to_hex(&base_oid), (uintmax_t)obj_offset,
@@ -1786,24 +1832,33 @@ void *unpack_entry(struct repository *r, struct packed_git *p, off_t obj_offset,
 			      "at offset %"PRIuMAX" from %s",
 			      (uintmax_t)curpos, p->pack_name);
 			data = NULL;
-			free(external_base);
-			continue;
+		} else {
+			data = patch_delta(base, base_size, delta_data,
+					   delta_size, &size);
+
+			/*
+			 * We could not apply the delta; warn the user, but
+			 * keep going. Our failure will be noticed either in
+			 * the next iteration of the loop, or if this is the
+			 * final delta, in the caller when we return NULL.
+			 * Those code paths will take care of making a more
+			 * explicit warning and retrying with another copy of
+			 * the object.
+			 */
+			if (!data)
+				error("failed to apply delta");
 		}
 
-		data = patch_delta(base, base_size,
-				   delta_data, delta_size,
-				   &size);
-
 		/*
-		 * We could not apply the delta; warn the user, but keep going.
-		 * Our failure will be noticed either in the next iteration of
-		 * the loop, or if this is the final delta, in the caller when
-		 * we return NULL. Those code paths will take care of making
-		 * a more explicit warning and retrying with another copy of
-		 * the object.
+		 * We delay adding `base` to the cache until the end of the loop
+		 * because unpack_compressed_entry() momentarily releases the
+		 * obj_read_mutex, giving another thread the chance to access
+		 * the cache. Therefore, if `base` was already there, this other
+		 * thread could free() it (e.g. to make space for another entry)
+		 * before we are done using it.
 		 */
-		if (!data)
-			error("failed to apply delta");
+		if (!external_base)
+			add_delta_base_cache(p, base_obj_offset, base, base_size, type);
 
 		free(delta_data);
 		free(external_base);
@@ -1847,36 +1902,27 @@ int bsearch_pack(const struct object_id *oid, const struct packed_git *p, uint32
 			    index_lookup, index_lookup_width, result);
 }
 
-const unsigned char *nth_packed_object_sha1(struct packed_git *p,
-					    uint32_t n)
+int nth_packed_object_id(struct object_id *oid,
+			 struct packed_git *p,
+			 uint32_t n)
 {
 	const unsigned char *index = p->index_data;
 	const unsigned int hashsz = the_hash_algo->rawsz;
 	if (!index) {
 		if (open_pack_index(p))
-			return NULL;
+			return -1;
 		index = p->index_data;
 	}
 	if (n >= p->num_objects)
-		return NULL;
+		return -1;
 	index += 4 * 256;
 	if (p->index_version == 1) {
-		return index + (hashsz + 4) * n + 4;
+		oidread(oid, index + (hashsz + 4) * n + 4);
 	} else {
 		index += 8;
-		return index + hashsz * n;
+		oidread(oid, index + hashsz * n);
 	}
-}
-
-const struct object_id *nth_packed_object_oid(struct object_id *oid,
-					      struct packed_git *p,
-					      uint32_t n)
-{
-	const unsigned char *hash = nth_packed_object_sha1(p, n);
-	if (!hash)
-		return NULL;
-	hashcpy(oid->hash, hash);
-	return oid;
+	return 0;
 }
 
 void check_pack_index_ptr(const struct packed_git *p, const void *vptr)
@@ -1899,14 +1945,14 @@ off_t nth_packed_object_offset(const struct packed_git *p, uint32_t n)
 	const unsigned int hashsz = the_hash_algo->rawsz;
 	index += 4 * 256;
 	if (p->index_version == 1) {
-		return ntohl(*((uint32_t *)(index + (hashsz + 4) * n)));
+		return ntohl(*((uint32_t *)(index + (hashsz + 4) * (size_t)n)));
 	} else {
 		uint32_t off;
-		index += 8 + p->num_objects * (hashsz + 4);
+		index += 8 + (size_t)p->num_objects * (hashsz + 4);
 		off = ntohl(*((uint32_t *)(index + 4 * n)));
 		if (!(off & 0x80000000))
 			return off;
-		index += p->num_objects * 4 + (off & 0x7fffffff) * 8;
+		index += (size_t)p->num_objects * 4 + (off & 0x7fffffff) * 8;
 		check_pack_index_ptr(p, index);
 		return get_be64(index);
 	}
@@ -2047,19 +2093,31 @@ int for_each_object_in_pack(struct packed_git *p,
 	}
 
 	for (i = 0; i < p->num_objects; i++) {
-		uint32_t pos;
+		uint32_t index_pos;
 		struct object_id oid;
 
+		/*
+		 * We are iterating "i" from 0 up to num_objects, but its
+		 * meaning may be different, depending on the requested output
+		 * order:
+		 *
+		 *   - in object-name order, it is the same as the index order
+		 *     used by nth_packed_object_id(), so we can pass it
+		 *     directly
+		 *
+		 *   - in pack-order, it is pack position, which we must
+		 *     convert to an index position in order to get the oid.
+		 */
 		if (flags & FOR_EACH_OBJECT_PACK_ORDER)
-			pos = p->revindex[i].nr;
+			index_pos = pack_pos_to_index(p, i);
 		else
-			pos = i;
+			index_pos = i;
 
-		if (!nth_packed_object_oid(&oid, p, pos))
+		if (nth_packed_object_id(&oid, p, index_pos) < 0)
 			return error("unable to get sha1 of object %u in %s",
-				     pos, p->pack_name);
+				     index_pos, p->pack_name);
 
-		r = cb(&oid, p, pos, data);
+		r = cb(&oid, p, index_pos, data);
 		if (r)
 			break;
 	}

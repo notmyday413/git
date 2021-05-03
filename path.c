@@ -724,7 +724,7 @@ static struct passwd *getpw_str(const char *username, size_t len)
  * then it is a newly allocated string. Returns NULL on getpw failure or
  * if path is NULL.
  *
- * If real_home is true, real_path($HOME) is used in the expansion.
+ * If real_home is true, strbuf_realpath($HOME) is used in the expansion.
  */
 char *expand_user_path(const char *path, int real_home)
 {
@@ -855,8 +855,8 @@ const char *enter_repo(const char *path, int strict)
 	}
 
 	if (is_git_directory(".")) {
-		set_git_dir(".");
-		check_repository_format();
+		set_git_dir(".", 0);
+		check_repository_format(NULL);
 		return path;
 	}
 
@@ -1082,6 +1082,8 @@ const char *remove_leading_path(const char *in, const char *prefix)
 
 /*
  * It is okay if dst == src, but they should not overlap otherwise.
+ * The "dst" buffer must be at least as long as "src"; normalizing may shrink
+ * the size of the path, but will never grow it.
  *
  * Performs the following normalizations on src, storing the result in dst:
  * - Ensures that components are separated by '/' (Windows only)
@@ -1570,12 +1572,11 @@ char *xdg_cache_home(const char *filename)
 	return NULL;
 }
 
-REPO_GIT_PATH_FUNC(cherry_pick_head, "CHERRY_PICK_HEAD")
-REPO_GIT_PATH_FUNC(revert_head, "REVERT_HEAD")
 REPO_GIT_PATH_FUNC(squash_msg, "SQUASH_MSG")
 REPO_GIT_PATH_FUNC(merge_msg, "MERGE_MSG")
 REPO_GIT_PATH_FUNC(merge_rr, "MERGE_RR")
 REPO_GIT_PATH_FUNC(merge_mode, "MERGE_MODE")
 REPO_GIT_PATH_FUNC(merge_head, "MERGE_HEAD")
+REPO_GIT_PATH_FUNC(merge_autostash, "MERGE_AUTOSTASH")
 REPO_GIT_PATH_FUNC(fetch_head, "FETCH_HEAD")
 REPO_GIT_PATH_FUNC(shallow, "shallow")

@@ -230,6 +230,7 @@ int mingw_rmdir(const char *path);
 
 int mingw_open (const char *filename, int oflags, ...);
 #define open mingw_open
+#undef OPEN_RETURNS_EINTR
 
 int mingw_fgetc(FILE *stream);
 #define fgetc mingw_fgetc
@@ -471,6 +472,8 @@ extern int (*win32_is_mount_point)(struct strbuf *path);
 #define PATH_SEP ';'
 char *mingw_query_user_email(void);
 #define query_user_email mingw_query_user_email
+char *mingw_strbuf_realpath(struct strbuf *resolved, const char *path);
+#define platform_strbuf_realpath mingw_strbuf_realpath
 #if !defined(__MINGW64_VERSION_MAJOR) && (!defined(_MSC_VER) || _MSC_VER < 1800)
 #define PRIuMAX "I64u"
 #define PRId64 "I64d"
@@ -696,7 +699,7 @@ int main(int argc, const char **argv);
  * Call this function to open a new MinTTY (this assumes you are in Git for
  * Windows' SDK) with a GDB that attaches to the current process right away.
  */
-extern void open_in_gdb(void);
+void open_in_gdb(void);
 
 /*
  * Used by Pthread API implementation for Windows

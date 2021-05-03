@@ -127,7 +127,7 @@ static void grow_object_hash(struct repository *r)
 	int new_hash_size = r->parsed_objects->obj_hash_size < 32 ? 32 : 2 * r->parsed_objects->obj_hash_size;
 	struct object **new_hash;
 
-	new_hash = xcalloc(new_hash_size, sizeof(struct object *));
+	CALLOC_ARRAY(new_hash, new_hash_size);
 	for (i = 0; i < r->parsed_objects->obj_hash_size; i++) {
 		struct object *obj = r->parsed_objects->obj_hash[i];
 
@@ -157,13 +157,13 @@ void *create_object(struct repository *r, const struct object_id *oid, void *o)
 	return obj;
 }
 
-void *object_as_type(struct repository *r, struct object *obj, enum object_type type, int quiet)
+void *object_as_type(struct object *obj, enum object_type type, int quiet)
 {
 	if (obj->type == type)
 		return obj;
 	else if (obj->type == OBJ_NONE) {
 		if (type == OBJ_COMMIT)
-			init_commit_node(r, (struct commit *) obj);
+			init_commit_node((struct commit *) obj);
 		else
 			obj->type = type;
 		return obj;
@@ -262,7 +262,7 @@ struct object *parse_object(struct repository *r, const struct object_id *oid)
 	if ((obj && obj->type == OBJ_BLOB && repo_has_object_file(r, oid)) ||
 	    (!obj && repo_has_object_file(r, oid) &&
 	     oid_object_info(r, oid, NULL) == OBJ_BLOB)) {
-		if (check_object_signature(repl, NULL, 0, NULL) < 0) {
+		if (check_object_signature(r, repl, NULL, 0, NULL) < 0) {
 			error(_("hash mismatch %s"), oid_to_hex(oid));
 			return NULL;
 		}
@@ -272,7 +272,8 @@ struct object *parse_object(struct repository *r, const struct object_id *oid)
 
 	buffer = repo_read_object_file(r, oid, &type, &size);
 	if (buffer) {
-		if (check_object_signature(repl, buffer, size, type_name(type)) < 0) {
+		if (check_object_signature(r, repl, buffer, size,
+					   type_name(type)) < 0) {
 			free(buffer);
 			error(_("hash mismatch %s"), oid_to_hex(repl));
 			return NULL;
@@ -305,6 +306,15 @@ int object_list_contains(struct object_list *list, struct object *obj)
 		list = list->next;
 	}
 	return 0;
+}
+
+void object_list_free(struct object_list **list)
+{
+	while (*list) {
+		struct object_list *p = *list;
+		*list = p->next;
+		free(p);
+	}
 }
 
 /*
@@ -402,15 +412,16 @@ void object_array_clear(struct object_array *array)
 }
 
 /*
- * Return true iff array already contains an entry with name.
+ * Return true if array already contains an entry.
  */
-static int contains_name(struct object_array *array, const char *name)
+static int contains_object(struct object_array *array,
+			   const struct object *item, const char *name)
 {
 	unsigned nr = array->nr, i;
 	struct object_array_entry *object = array->objects;
 
 	for (i = 0; i < nr; i++, object++)
-		if (!strcmp(object->name, name))
+		if (item == object->item && !strcmp(object->name, name))
 			return 1;
 	return 0;
 }
@@ -422,7 +433,8 @@ void object_array_remove_duplicates(struct object_array *array)
 
 	array->nr = 0;
 	for (src = 0; src < nr; src++) {
-		if (!contains_name(array, objects[src].name)) {
+		if (!contains_object(array, objects[src].item,
+				     objects[src].name)) {
 			if (src != array->nr)
 				objects[array->nr] = objects[src];
 			array->nr++;
@@ -443,12 +455,12 @@ void clear_object_flags(unsigned flags)
 	}
 }
 
-void clear_commit_marks_all(unsigned int flags)
+void repo_clear_commit_marks(struct repository *r, unsigned int flags)
 {
 	int i;
 
-	for (i = 0; i < the_repository->parsed_objects->obj_hash_size; i++) {
-		struct object *obj = the_repository->parsed_objects->obj_hash[i];
+	for (i = 0; i < r->parsed_objects->obj_hash_size; i++) {
+		struct object *obj = r->parsed_objects->obj_hash[i];
 		if (obj && obj->type == OBJ_COMMIT)
 			obj->flags &= ~flags;
 	}
@@ -466,7 +478,7 @@ struct parsed_object_pool *parsed_object_pool_new(void)
 	o->object_state = allocate_alloc_state();
 
 	o->is_shallow = -1;
-	o->shallow_stat = xcalloc(1, sizeof(*o->shallow_stat));
+	CALLOC_ARRAY(o->shallow_stat, 1);
 
 	o->buffer_slab = allocate_commit_buffer_slab();
 
@@ -480,6 +492,7 @@ struct raw_object_store *raw_object_store_new(void)
 	memset(o, 0, sizeof(*o));
 	INIT_LIST_HEAD(&o->packed_git_mru);
 	hashmap_init(&o->pack_map, pack_map_entry_cmp, NULL, 0);
+	pthread_mutex_init(&o->replace_mutex, NULL);
 	return o;
 }
 
@@ -507,6 +520,7 @@ void raw_object_store_clear(struct raw_object_store *o)
 
 	oidmap_free(o->replace_map, 1);
 	FREE_AND_NULL(o->replace_map);
+	pthread_mutex_destroy(&o->replace_mutex);
 
 	free_commit_graph(o->commit_graph);
 	o->commit_graph = NULL;
@@ -520,7 +534,7 @@ void raw_object_store_clear(struct raw_object_store *o)
 	close_object_store(o);
 	o->packed_git = NULL;
 
-	hashmap_free(&o->pack_map);
+	hashmap_clear(&o->pack_map);
 }
 
 void parsed_object_pool_clear(struct parsed_object_pool *o)

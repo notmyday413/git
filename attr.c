@@ -52,13 +52,6 @@ static inline void hashmap_unlock(struct attr_hashmap *map)
 	pthread_mutex_unlock(&map->mutex);
 }
 
-/*
- * The global dictionary of all interned attributes.  This
- * is a singleton object which is shared between threads.
- * Access to this dictionary must be surrounded with a mutex.
- */
-static struct attr_hashmap g_attr_hashmap;
-
 /* The container for objects stored in "struct attr_hashmap" */
 struct attr_hash_entry {
 	struct hashmap_entry ent;
@@ -80,11 +73,14 @@ static int attr_hash_entry_cmp(const void *unused_cmp_data,
 	return (a->keylen != b->keylen) || strncmp(a->key, b->key, a->keylen);
 }
 
-/* Initialize an 'attr_hashmap' object */
-static void attr_hashmap_init(struct attr_hashmap *map)
-{
-	hashmap_init(&map->map, attr_hash_entry_cmp, NULL, 0);
-}
+/*
+ * The global dictionary of all interned attributes.  This
+ * is a singleton object which is shared between threads.
+ * Access to this dictionary must be surrounded with a mutex.
+ */
+static struct attr_hashmap g_attr_hashmap = {
+	HASHMAP_INIT(attr_hash_entry_cmp, NULL)
+};
 
 /*
  * Retrieve the 'value' stored in a hashmap given the provided 'key'.
@@ -95,9 +91,6 @@ static void *attr_hashmap_get(struct attr_hashmap *map,
 {
 	struct attr_hash_entry k;
 	struct attr_hash_entry *e;
-
-	if (!map->map.tablesize)
-		attr_hashmap_init(map);
 
 	hashmap_entry_init(&k.ent, memhash(key, keylen));
 	k.key = key;
@@ -113,9 +106,6 @@ static void attr_hashmap_add(struct attr_hashmap *map,
 			     void *value)
 {
 	struct attr_hash_entry *e;
-
-	if (!map->map.tablesize)
-		attr_hashmap_init(map);
 
 	e = xmalloc(sizeof(struct attr_hash_entry));
 	hashmap_entry_init(&e->ent, memhash(key, keylen));
@@ -579,7 +569,7 @@ struct attr_check *attr_check_initl(const char *one, ...)
 	check = attr_check_alloc();
 	check->nr = cnt;
 	check->alloc = cnt;
-	check->items = xcalloc(cnt, sizeof(struct attr_check_item));
+	CALLOC_ARRAY(check->items, cnt);
 
 	check->items[0].attr = git_attr(one);
 	va_start(params, one);
@@ -680,7 +670,7 @@ static struct attr_stack *read_attr_from_array(const char **list)
 	const char *line;
 	int lineno = 0;
 
-	res = xcalloc(1, sizeof(*res));
+	CALLOC_ARRAY(res, 1);
 	while ((line = *(list++)) != NULL)
 		handle_attr_line(res, line, "[builtin]", ++lineno, 1);
 	return res;
@@ -717,7 +707,7 @@ static struct attr_stack *read_attr_from_file(const char *path, int macro_ok)
 
 	if (!fp)
 		return NULL;
-	res = xcalloc(1, sizeof(*res));
+	CALLOC_ARRAY(res, 1);
 	while (fgets(buf, sizeof(buf), fp)) {
 		char *bufp = buf;
 		if (!lineno)
@@ -743,7 +733,7 @@ static struct attr_stack *read_attr_from_index(const struct index_state *istate,
 	if (!buf)
 		return NULL;
 
-	res = xcalloc(1, sizeof(*res));
+	CALLOC_ARRAY(res, 1);
 	for (sp = buf; *sp; ) {
 		char *ep;
 		int more;
@@ -784,7 +774,7 @@ static struct attr_stack *read_attr(const struct index_state *istate,
 	}
 
 	if (!res)
-		res = xcalloc(1, sizeof(*res));
+		CALLOC_ARRAY(res, 1);
 	return res;
 }
 
@@ -884,7 +874,7 @@ static void bootstrap_attr_stack(const struct index_state *istate,
 	else
 		e = NULL;
 	if (!e)
-		e = xcalloc(1, sizeof(struct attr_stack));
+		CALLOC_ARRAY(e, 1);
 	push_stack(stack, e, NULL, 0);
 }
 

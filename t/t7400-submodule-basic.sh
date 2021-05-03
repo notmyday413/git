@@ -9,6 +9,9 @@ This test tries to verify basic sanity of the init, update and status
 subcommands of git submodule.
 '
 
+GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
+export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
+
 . ./test-lib.sh
 
 test_expect_success 'submodule deinit works on empty repository' '
@@ -52,7 +55,22 @@ test_expect_success 'add aborts on repository with no commits' '
 	EOF
 	git init repo-no-commits &&
 	test_must_fail git submodule add ../a ./repo-no-commits 2>actual &&
-	test_i18ncmp expect actual
+	test_cmp expect actual
+'
+
+test_expect_success 'status should ignore inner git repo when not added' '
+	rm -fr inner &&
+	mkdir inner &&
+	(
+		cd inner &&
+		git init &&
+		>t &&
+		git add t &&
+		git commit -m "initial"
+	) &&
+	test_must_fail git submodule status inner 2>output.err &&
+	rm -fr inner &&
+	test_i18ngrep "^error: .*did not match any file(s) known to git" output.err
 '
 
 test_expect_success 'setup - repository in init subdirectory' '
@@ -109,7 +127,7 @@ inspect() {
 }
 
 test_expect_success 'submodule add' '
-	echo "refs/heads/master" >expect &&
+	echo "refs/heads/main" >expect &&
 
 	(
 		cd addtest &&
@@ -156,16 +174,18 @@ test_expect_success 'submodule add to .gitignored path fails' '
 	(
 		cd addtest-ignore &&
 		cat <<-\EOF >expect &&
-		The following path is ignored by one of your .gitignore files:
+		The following paths are ignored by one of your .gitignore files:
 		submod
-		Use -f if you really want to add it.
+		hint: Use -f if you really want to add them.
+		hint: Turn this message off by running
+		hint: "git config advice.addIgnoredFile false"
 		EOF
 		# Does not use test_commit due to the ignore
 		echo "*" > .gitignore &&
 		git add --force .gitignore &&
 		git commit -m"Ignore everything" &&
 		! git submodule add "$submodurl" submod >actual 2>&1 &&
-		test_i18ncmp expect actual
+		test_cmp expect actual
 	)
 '
 
@@ -191,11 +211,22 @@ test_expect_success 'submodule add to reconfigure existing submodule with --forc
 	)
 '
 
+test_expect_success 'submodule add relays add --dry-run stderr' '
+	test_when_finished "rm -rf addtest/.git/index.lock" &&
+	(
+		cd addtest &&
+		: >.git/index.lock &&
+		! git submodule add "$submodurl" sub-while-locked 2>output.err &&
+		test_i18ngrep "^fatal: .*index\.lock" output.err &&
+		test_path_is_missing sub-while-locked
+	)
+'
+
 test_expect_success 'submodule add --branch' '
 	echo "refs/heads/initial" >expect-head &&
 	cat <<-\EOF >expect-heads &&
 	refs/heads/initial
-	refs/heads/master
+	refs/heads/main
 	EOF
 
 	(
@@ -213,7 +244,7 @@ test_expect_success 'submodule add --branch' '
 '
 
 test_expect_success 'submodule add with ./ in path' '
-	echo "refs/heads/master" >expect &&
+	echo "refs/heads/main" >expect &&
 
 	(
 		cd addtest &&
@@ -229,7 +260,7 @@ test_expect_success 'submodule add with ./ in path' '
 '
 
 test_expect_success 'submodule add with /././ in path' '
-	echo "refs/heads/master" >expect &&
+	echo "refs/heads/main" >expect &&
 
 	(
 		cd addtest &&
@@ -245,7 +276,7 @@ test_expect_success 'submodule add with /././ in path' '
 '
 
 test_expect_success 'submodule add with // in path' '
-	echo "refs/heads/master" >expect &&
+	echo "refs/heads/main" >expect &&
 
 	(
 		cd addtest &&
@@ -261,7 +292,7 @@ test_expect_success 'submodule add with // in path' '
 '
 
 test_expect_success 'submodule add with /.. in path' '
-	echo "refs/heads/master" >expect &&
+	echo "refs/heads/main" >expect &&
 
 	(
 		cd addtest &&
@@ -277,7 +308,7 @@ test_expect_success 'submodule add with /.. in path' '
 '
 
 test_expect_success 'submodule add with ./, /.. and // in path' '
-	echo "refs/heads/master" >expect &&
+	echo "refs/heads/main" >expect &&
 
 	(
 		cd addtest &&
@@ -307,7 +338,7 @@ test_expect_success !CYGWIN 'submodule add with \\ in path' '
 '
 
 test_expect_success 'submodule add in subdirectory' '
-	echo "refs/heads/master" >expect &&
+	echo "refs/heads/main" >expect &&
 
 	mkdir addtest/sub &&
 	(
@@ -397,6 +428,14 @@ test_expect_success 'init should register submodule url in .git/config' '
 	git config submodule.example.url ./.subrepo &&
 
 	test_cmp expect url
+'
+
+test_expect_success 'status should still be "missing" after initializing' '
+	rm -fr init &&
+	mkdir init &&
+	git submodule status >lines &&
+	rm -fr init &&
+	grep "^-$rev1" lines
 '
 
 test_failure_with_unknown_submodule () {
@@ -521,7 +560,7 @@ test_expect_success 'status should be "up-to-date" after update' '
 
 test_expect_success 'checkout superproject with subproject already present' '
 	git checkout initial &&
-	git checkout master
+	git checkout main
 '
 
 test_expect_success 'apply submodule diff' '
@@ -538,7 +577,7 @@ test_expect_success 'apply submodule diff' '
 	git checkout second &&
 	git apply --index P.diff &&
 
-	git diff --cached master >staged &&
+	git diff --cached main >staged &&
 	test_must_be_empty staged
 '
 
@@ -902,7 +941,7 @@ test_expect_success 'submodule add --name allows to replace a submodule with ano
 		echo "repo" >expect &&
 		test_must_fail git config -f .gitmodules submodule.repo.path &&
 		git config -f .gitmodules submodule.repo_new.path >actual &&
-		test_cmp expect actual&&
+		test_cmp expect actual &&
 		echo "$submodurl/repo" >expect &&
 		test_must_fail git config -f .gitmodules submodule.repo.url &&
 		echo "$submodurl/bare.git" >expect &&
@@ -974,7 +1013,7 @@ test_expect_success 'submodule add with an existing name fails unless forced' '
 		test -d repo &&
 		echo "repo" >expect &&
 		git config -f .gitmodules submodule.repo_new.path >actual &&
-		test_cmp expect actual&&
+		test_cmp expect actual &&
 		echo "$submodurl/repo.git" >expect &&
 		git config -f .gitmodules submodule.repo_new.url >actual &&
 		test_cmp expect actual &&
@@ -1195,7 +1234,7 @@ test_expect_success 'submodule helper list is not confused by common prefixes' '
 	git submodule add /dir1/b dir1/b &&
 	git submodule add /dir2/b dir2/b &&
 	git commit -m "first submodule commit" &&
-	git submodule--helper list dir1/b |cut -c51- >actual &&
+	git submodule--helper list dir1/b | cut -f 2 >actual &&
 	echo "dir1/b" >expect &&
 	test_cmp expect actual
 '
@@ -1224,7 +1263,7 @@ test_expect_success 'submodule update --init with a specification' '
 	pwd=$(pwd) &&
 	git clone file://"$pwd"/multisuper multisuper_clone &&
 	git -C multisuper_clone submodule update --init . ":(exclude)sub0" &&
-	git -C multisuper_clone submodule status |cut -c 1,43- >actual &&
+	git -C multisuper_clone submodule status | sed "s/$OID_REGEX //" >actual &&
 	test_cmp expect actual
 '
 
@@ -1235,7 +1274,7 @@ test_expect_success 'submodule update --init with submodule.active set' '
 	git -C multisuper_clone config submodule.active "." &&
 	git -C multisuper_clone config --add submodule.active ":(exclude)sub0" &&
 	git -C multisuper_clone submodule update --init &&
-	git -C multisuper_clone submodule status |cut -c 1,43- >actual &&
+	git -C multisuper_clone submodule status | sed "s/$OID_REGEX //" >actual &&
 	test_cmp expect actual
 '
 
@@ -1254,7 +1293,7 @@ test_expect_success 'submodule update and setting submodule.<name>.active' '
 	-sub3
 	EOF
 	git -C multisuper_clone submodule update &&
-	git -C multisuper_clone submodule status |cut -c 1,43- >actual &&
+	git -C multisuper_clone submodule status | sed "s/$OID_REGEX //" >actual &&
 	test_cmp expect actual
 '
 
@@ -1271,12 +1310,12 @@ test_expect_success 'clone active submodule without submodule url set' '
 		git submodule update &&
 		git submodule status >actual_raw &&
 
-		cut -c 1,43- actual_raw >actual &&
+		cut -d" " -f3- actual_raw >actual &&
 		cat >expect <<-\EOF &&
-		 sub0 (test2)
-		 sub1 (test2)
-		 sub2 (test2)
-		 sub3 (test2)
+		sub0 (test2)
+		sub1 (test2)
+		sub2 (test2)
+		sub3 (test2)
 		EOF
 		test_cmp expect actual
 	)
@@ -1292,7 +1331,7 @@ test_expect_success 'clone --recurse-submodules with a pathspec works' '
 	EOF
 
 	git clone --recurse-submodules="sub0" multisuper multisuper_clone &&
-	git -C multisuper_clone submodule status |cut -c1,43- >actual &&
+	git -C multisuper_clone submodule status | sed "s/$OID_REGEX //" >actual &&
 	test_cmp expected actual
 '
 
@@ -1309,7 +1348,7 @@ test_expect_success 'clone with multiple --recurse-submodules options' '
 		  --recurse-submodules=":(exclude)sub0" \
 		  --recurse-submodules=":(exclude)sub2" \
 		  multisuper multisuper_clone &&
-	git -C multisuper_clone submodule status |cut -c1,43- >actual &&
+	git -C multisuper_clone submodule status | sed "s/$OID_REGEX //" >actual &&
 	test_cmp expect actual
 '
 
@@ -1337,7 +1376,7 @@ test_expect_success 'clone and subsequent updates correctly auto-initialize subm
 		  --recurse-submodules=":(exclude)sub4" \
 		  multisuper multisuper_clone &&
 
-	git -C multisuper_clone submodule status |cut -c1,43- >actual &&
+	git -C multisuper_clone submodule status | sed "s/$OID_REGEX //" >actual &&
 	test_cmp expect actual &&
 
 	git -C multisuper submodule add ../sub1 sub4 &&
@@ -1346,7 +1385,7 @@ test_expect_success 'clone and subsequent updates correctly auto-initialize subm
 	# obtain the new superproject
 	git -C multisuper_clone pull &&
 	git -C multisuper_clone submodule update --init &&
-	git -C multisuper_clone submodule status |cut -c1,43- >actual &&
+	git -C multisuper_clone submodule status | sed "s/$OID_REGEX //" >actual &&
 	test_cmp expect2 actual
 '
 

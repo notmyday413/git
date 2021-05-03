@@ -52,7 +52,7 @@ void commit_notes(struct repository *r, struct notes_tree *t, const char *msg)
 	strbuf_complete_line(&buf);
 
 	create_notes_commit(r, t, NULL, buf.buf, buf.len, &commit_oid);
-	strbuf_insert(&buf, 0, "notes: ", 7); /* commit message starts at index 7 */
+	strbuf_insertstr(&buf, 0, "notes: ");
 	update_ref(buf.buf, t->update_ref, &commit_oid, NULL, 0,
 		   UPDATE_REFS_DIE_ON_ERR);
 
@@ -129,7 +129,7 @@ struct notes_rewrite_cfg *init_copy_notes_for_rewrite(const char *cmd)
 	c->cmd = cmd;
 	c->enabled = 1;
 	c->combine = combine_notes_concatenate;
-	c->refs = xcalloc(1, sizeof(struct string_list));
+	CALLOC_ARRAY(c->refs, 1);
 	c->refs->strdup_strings = 1;
 	c->refs_from_env = 0;
 	c->mode_from_env = 0;

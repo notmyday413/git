@@ -7,6 +7,7 @@
 *.png binary
 *.py eol=lf diff=python
 *.bat eol=crlf
+CODE_OF_CONDUCT.md -whitespace
 /Documentation/**/*.txt eol=lf
 /command-list.txt eol=lf
 /GIT-VERSION-GEN eol=lf

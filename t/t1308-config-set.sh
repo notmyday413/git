@@ -208,14 +208,14 @@ test_expect_success 'proper error on error in default config files' '
 	echo "[" >>.git/config &&
 	echo "fatal: bad config line 34 in file .git/config" >expect &&
 	test_expect_code 128 test-tool config get_value foo.bar 2>actual &&
-	test_i18ncmp expect actual
+	test_cmp expect actual
 '
 
 test_expect_success 'proper error on error in custom config files' '
 	echo "[" >>syntax-error &&
 	echo "fatal: bad config line 1 in file syntax-error" >expect &&
 	test_expect_code 128 test-tool config configset_get_value foo.bar syntax-error 2>actual &&
-	test_i18ncmp expect actual
+	test_cmp expect actual
 '
 
 test_expect_success 'check line errors for malformed values' '
@@ -238,8 +238,8 @@ test_expect_success 'error on modifying repo config without repo' '
 
 cmdline_config="'foo.bar=from-cmdline'"
 test_expect_success 'iteration shows correct origins' '
-	echo "[foo]bar = from-repo" >.git/config &&
-	echo "[foo]bar = from-home" >.gitconfig &&
+	printf "[ignore]\n\tthis = please\n[foo]bar = from-repo\n" >.git/config &&
+	printf "[foo]\n\tbar = from-home\n" >.gitconfig &&
 	if test_have_prereq MINGW
 	then
 		# Use Windows path (i.e. *not* $HOME)
@@ -253,19 +253,29 @@ test_expect_success 'iteration shows correct origins' '
 	value=from-home
 	origin=file
 	name=$HOME_GITCONFIG
+	lno=2
 	scope=global
+
+	key=ignore.this
+	value=please
+	origin=file
+	name=.git/config
+	lno=2
+	scope=local
 
 	key=foo.bar
 	value=from-repo
 	origin=file
 	name=.git/config
-	scope=repo
+	lno=3
+	scope=local
 
 	key=foo.bar
 	value=from-cmdline
 	origin=command line
 	name=
-	scope=cmdline
+	lno=-1
+	scope=command
 	EOF
 	GIT_CONFIG_PARAMETERS=$cmdline_config test-tool config iterate >actual &&
 	test_cmp expect actual

@@ -11,6 +11,9 @@ test_description='test describe'
 #
 # First parent of a merge commit is on the same line, second parent below.
 
+GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
+export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
+
 . ./test-lib.sh
 
 check_describe () {
@@ -102,7 +105,7 @@ check_describe c-* --tags HEAD^^2
 check_describe B --tags HEAD^^2^
 check_describe e --tags HEAD^^^
 
-check_describe heads/master --all HEAD
+check_describe heads/main --all HEAD
 check_describe tags/c-* --all HEAD^
 check_describe tags/e --all HEAD^^^
 
@@ -129,12 +132,30 @@ test_expect_success 'rename tag A to Q locally' '
 	mv .git/refs/tags/A .git/refs/tags/Q
 '
 cat - >err.expect <<EOF
-warning: tag 'A' is really 'Q' here
+warning: tag 'Q' is externally known as 'A'
 EOF
 check_describe A-* HEAD
 test_expect_success 'warning was displayed for Q' '
-	test_i18ncmp err.expect err.actual
+	test_cmp err.expect err.actual
 '
+test_expect_success 'misnamed annotated tag forces long output' '
+	description=$(git describe --no-long Q^0) &&
+	expr "$description" : "A-0-g[0-9a-f]*$" &&
+	git rev-parse --verify "$description" >actual &&
+	git rev-parse --verify Q^0 >expect &&
+	test_cmp expect actual
+'
+
+test_expect_success 'abbrev=0 will not break misplaced tag (1)' '
+	description=$(git describe --abbrev=0 Q^0) &&
+	expr "$description" : "A-0-g[0-9a-f]*$"
+'
+
+test_expect_success 'abbrev=0 will not break misplaced tag (2)' '
+	description=$(git describe --abbrev=0 c^0) &&
+	expr "$description" : "A-1-g[0-9a-f]*$"
+'
+
 test_expect_success 'rename tag Q back to A' '
 	mv .git/refs/tags/Q .git/refs/tags/A
 '
@@ -385,15 +406,15 @@ test_expect_success ULIMIT_STACK_SIZE 'name-rev works in a deep repo' '
 	i=1 &&
 	while test $i -lt 8000
 	do
-		echo "commit refs/heads/master
+		echo "commit refs/heads/main
 committer A U Thor <author@example.com> $((1000000000 + $i * 100)) +0200
 data <<EOF
 commit #$i
 EOF"
-		test $i = 1 && echo "from refs/heads/master^0"
+		test $i = 1 && echo "from refs/heads/main^0"
 		i=$(($i + 1))
 	done | git fast-import &&
-	git checkout master &&
+	git checkout main &&
 	git tag far-far-away HEAD^ &&
 	echo "HEAD~4000 tags/far-far-away~3999" >expect &&
 	git name-rev HEAD~4000 >actual &&
@@ -424,7 +445,7 @@ test_expect_success 'describe complains about missing object' '
 '
 
 test_expect_success 'name-rev a rev shortly after epoch' '
-	test_when_finished "git checkout master" &&
+	test_when_finished "git checkout main" &&
 
 	git checkout --orphan no-timestamp-underflow &&
 	# Any date closer to epoch than the CUTOFF_DATE_SLOP constant
@@ -438,7 +459,7 @@ test_expect_success 'name-rev a rev shortly after epoch' '
 	test_cmp expect actual
 '
 
-# A--------------master
+# A--------------main
 #  \            /
 #   \----------M2
 #    \        /
@@ -469,13 +490,64 @@ test_expect_success 'name-rev covers all conditions while looking at parents' '
 		git checkout $A &&
 		git merge --no-ff HEAD@{1} && # M2
 
-		git checkout master &&
+		git checkout main &&
 		git merge --no-ff HEAD@{1} &&
 
-		echo "$B master^2^2~1^2" >expect &&
+		echo "$B main^2^2~1^2" >expect &&
 		git name-rev $B >actual &&
 
 		test_cmp expect actual
+	)
+'
+
+#               B
+#               o
+#                \
+#  o-----o---o----x
+#        A
+#
+test_expect_success 'describe commits with disjoint bases' '
+	git init disjoint1 &&
+	(
+		cd disjoint1 &&
+
+		echo o >> file && git add file && git commit -m o &&
+		echo A >> file && git add file && git commit -m A &&
+		git tag A -a -m A &&
+		echo o >> file && git add file && git commit -m o &&
+
+		git checkout --orphan branch && rm file &&
+		echo B > file2 && git add file2 && git commit -m B &&
+		git tag B -a -m B &&
+		git merge --no-ff --allow-unrelated-histories main -m x &&
+
+		check_describe "A-3-*" HEAD
+	)
+'
+
+#           B
+#   o---o---o------------.
+#                         \
+#                  o---o---x
+#                  A
+#
+test_expect_success 'describe commits with disjoint bases 2' '
+	git init disjoint2 &&
+	(
+		cd disjoint2 &&
+
+		echo A >> file && git add file && GIT_COMMITTER_DATE="2020-01-01 18:00" git commit -m A &&
+		git tag A -a -m A &&
+		echo o >> file && git add file && GIT_COMMITTER_DATE="2020-01-01 18:01" git commit -m o &&
+
+		git checkout --orphan branch &&
+		echo o >> file2 && git add file2 && GIT_COMMITTER_DATE="2020-01-01 15:00" git commit -m o &&
+		echo o >> file2 && git add file2 && GIT_COMMITTER_DATE="2020-01-01 15:01" git commit -m o &&
+		echo B >> file2 && git add file2 && GIT_COMMITTER_DATE="2020-01-01 15:02" git commit -m B &&
+		git tag B -a -m B &&
+		git merge --no-ff --allow-unrelated-histories main -m x &&
+
+		check_describe "B-3-*" HEAD
 	)
 '
 

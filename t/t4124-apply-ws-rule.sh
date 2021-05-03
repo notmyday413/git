@@ -35,9 +35,15 @@ prepare_test_file () {
 }
 
 apply_patch () {
+	cmd_prefix= &&
+	if test "x$1" = 'x!'
+	then
+		cmd_prefix=test_must_fail &&
+		shift
+	fi &&
 	>target &&
 	sed -e "s|\([ab]\)/file|\1/target|" <patch |
-	git apply "$@"
+	$cmd_prefix git apply "$@"
 }
 
 test_fix () {
@@ -45,7 +51,14 @@ test_fix () {
 	apply_patch --whitespace=fix || return 1
 
 	# find touched lines
-	$DIFF -u file target | sed -n -e "3,\$s/^+//p" >fixed
+	$DIFF file target | sed -n -e "s/^> //p" >fixed
+	# busybox's diff(1) doesn't output normal format
+	if ! test -s fixed
+	then
+		$DIFF -u file target |
+		grep -v '^+++ target' |
+		sed -ne "/^+/s/+//p" >fixed
+	fi
 
 	# the changed lines are all expected to change
 	fixed_cnt=$(wc -l <fixed)
@@ -99,7 +112,7 @@ test_expect_success 'whitespace=warn, default rule' '
 
 test_expect_success 'whitespace=error-all, default rule' '
 
-	test_must_fail apply_patch --whitespace=error-all &&
+	apply_patch ! --whitespace=error-all &&
 	test_must_be_empty target
 
 '

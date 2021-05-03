@@ -113,8 +113,7 @@ static int fstat_output(int fd, const struct checkout *state, struct stat *st)
 	/* use fstat() only when path == ce->name */
 	if (fstat_is_reliable() &&
 	    state->refresh_cache && !state->base_dir_len) {
-		fstat(fd, st);
-		return 1;
+		return !fstat(fd, st);
 	}
 	return 0;
 }
@@ -264,6 +263,9 @@ static int write_entry(struct cache_entry *ce,
 	size_t newsize = 0;
 	struct stat st;
 	const struct submodule *sub;
+	struct checkout_metadata meta;
+
+	clone_checkout_metadata(&meta, &state->meta, &ce->oid);
 
 	if (ce_mode_s_ifmt == S_IFREG) {
 		struct stream_filter *filter = get_stream_filter(state->istate, ce->name,
@@ -280,7 +282,7 @@ static int write_entry(struct cache_entry *ce,
 		new_blob = read_blob_entry(ce, &size);
 		if (!new_blob)
 			return error("unable to read sha1 file of %s (%s)",
-				     path, oid_to_hex(&ce->oid));
+				     ce->name, oid_to_hex(&ce->oid));
 
 		/*
 		 * We can't make a real symlink; write out a regular file entry
@@ -307,7 +309,7 @@ static int write_entry(struct cache_entry *ce,
 			new_blob = read_blob_entry(ce, &size);
 			if (!new_blob)
 				return error("unable to read sha1 file of %s (%s)",
-					     path, oid_to_hex(&ce->oid));
+					     ce->name, oid_to_hex(&ce->oid));
 		}
 
 		/*
@@ -315,13 +317,13 @@ static int write_entry(struct cache_entry *ce,
 		 */
 		if (dco && dco->state != CE_NO_DELAY) {
 			ret = async_convert_to_working_tree(state->istate, ce->name, new_blob,
-							    size, &buf, dco);
+							    size, &buf, &meta, dco);
 			if (ret && string_list_has_string(&dco->paths, ce->name)) {
 				free(new_blob);
 				goto delayed;
 			}
 		} else
-			ret = convert_to_working_tree(state->istate, ce->name, new_blob, size, &buf);
+			ret = convert_to_working_tree(state->istate, ce->name, new_blob, size, &buf, &meta);
 
 		if (ret) {
 			free(new_blob);
@@ -352,7 +354,7 @@ static int write_entry(struct cache_entry *ce,
 
 	case S_IFGITLINK:
 		if (to_tempfile)
-			return error("cannot create temporary submodule %s", path);
+			return error("cannot create temporary submodule %s", ce->name);
 		if (mkdir(path, 0777) < 0)
 			return error("cannot create submodule directory %s", path);
 		sub = submodule_from_ce(ce);
@@ -363,7 +365,7 @@ static int write_entry(struct cache_entry *ce,
 		break;
 
 	default:
-		return error("unknown file mode for %s in index", path);
+		return error("unknown file mode for %s in index", ce->name);
 	}
 
 finish:
@@ -511,8 +513,6 @@ int checkout_entry(struct cache_entry *ce, const struct checkout *state,
 			/* If it is a gitlink, leave it alone! */
 			if (S_ISGITLINK(ce->ce_mode))
 				return 0;
-			if (!state->force)
-				return error("%s is a directory", path.buf);
 			remove_subtree(&path);
 		} else if (unlink(path.buf))
 			return error_errno("unable to unlink old '%s'", path.buf);

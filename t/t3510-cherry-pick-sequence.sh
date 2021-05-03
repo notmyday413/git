@@ -123,7 +123,8 @@ test_expect_success 'revert --skip to skip commit' '
 test_expect_success 'skip "empty" commit' '
 	pristine_detach picked &&
 	test_commit dummy foo d &&
-	test_must_fail git cherry-pick anotherpick &&
+	test_must_fail git cherry-pick anotherpick 2>err &&
+	test_i18ngrep "git cherry-pick --skip" err &&
 	git cherry-pick --skip &&
 	test_cmp_rev dummy HEAD
 '
@@ -169,7 +170,7 @@ test_expect_success 'check advice when we move HEAD by committing' '
 	git commit -a &&
 	test_path_is_missing .git/CHERRY_PICK_HEAD &&
 	test_must_fail git cherry-pick --skip 2>advice &&
-	test_i18ncmp expect advice
+	test_cmp expect advice
 '
 
 test_expect_success 'selectively advise --skip while launching another sequence' '
@@ -181,7 +182,7 @@ test_expect_success 'selectively advise --skip while launching another sequence'
 	EOF
 	test_must_fail git cherry-pick picked..yetanotherpick &&
 	test_must_fail git cherry-pick picked..yetanotherpick 2>advice &&
-	test_i18ncmp expect advice &&
+	test_cmp expect advice &&
 	cat >expect <<-EOF &&
 	error: cherry-pick is already in progress
 	hint: try "git cherry-pick (--continue | --abort | --quit)"
@@ -189,7 +190,7 @@ test_expect_success 'selectively advise --skip while launching another sequence'
 	EOF
 	git reset --merge &&
 	test_must_fail git cherry-pick picked..yetanotherpick 2>advice &&
-	test_i18ncmp expect advice
+	test_cmp expect advice
 '
 
 test_expect_success 'allow skipping commit but not abort for a new history' '
@@ -203,7 +204,7 @@ test_expect_success 'allow skipping commit but not abort for a new history' '
 	test_must_fail git cherry-pick anotherpick &&
 	test_must_fail git cherry-pick --abort 2>advice &&
 	git cherry-pick --skip &&
-	test_i18ncmp expect advice
+	test_cmp expect advice
 '
 
 test_expect_success 'allow skipping stopped cherry-pick because of untracked file modifications' '

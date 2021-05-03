@@ -14,7 +14,7 @@
 #include "pack-revindex.h"
 #include "hash.h"
 #include "path.h"
-#include "sha1-array.h"
+#include "oid-array.h"
 #include "repository.h"
 #include "mem-pool.h"
 
@@ -324,10 +324,11 @@ struct index_state {
 	struct hashmap dir_hash;
 	struct object_id oid;
 	struct untracked_cache *untracked;
-	uint64_t fsmonitor_last_update;
+	char *fsmonitor_last_update;
 	struct ewah_bitmap *fsmonitor_dirty;
 	struct mem_pool *ce_mem_pool;
 	struct progress *progress;
+	struct repository *repo;
 };
 
 /* Name hashing */
@@ -472,6 +473,7 @@ static inline enum object_type object_type(unsigned int mode)
 #define TEMPLATE_DIR_ENVIRONMENT "GIT_TEMPLATE_DIR"
 #define CONFIG_ENVIRONMENT "GIT_CONFIG"
 #define CONFIG_DATA_ENVIRONMENT "GIT_CONFIG_PARAMETERS"
+#define CONFIG_COUNT_ENVIRONMENT "GIT_CONFIG_COUNT"
 #define EXEC_PATH_ENVIRONMENT "GIT_EXEC_PATH"
 #define CEILING_DIRECTORIES_ENVIRONMENT "GIT_CEILING_DIRECTORIES"
 #define NO_REPLACE_OBJECTS_ENVIRONMENT "GIT_NO_REPLACE_OBJECTS"
@@ -543,7 +545,7 @@ const char *get_git_common_dir(void);
 char *get_object_directory(void);
 char *get_index_file(void);
 char *get_graft_file(struct repository *r);
-void set_git_dir(const char *path);
+void set_git_dir(const char *path, int make_realpath);
 int get_common_dir_noenv(struct strbuf *sb, const char *gitdir);
 int get_common_dir(struct strbuf *sb, const char *gitdir);
 const char *get_git_namespace(void);
@@ -627,7 +629,9 @@ int path_inside_repo(const char *prefix, const char *path);
 #define INIT_DB_EXIST_OK 0x0002
 
 int init_db(const char *git_dir, const char *real_git_dir,
-	    const char *template_dir, unsigned int flags);
+	    const char *template_dir, int hash_algo,
+	    const char *initial_branch, unsigned int flags);
+void initialize_repository_version(int hash_algo, int reinit);
 
 void sanitize_stdfds(void);
 int daemonize(void);
@@ -919,8 +923,8 @@ extern int assume_unchanged;
 extern int prefer_symlink_refs;
 extern int warn_ambiguous_refs;
 extern int warn_on_object_refname_ambiguity;
-extern const char *apply_default_whitespace;
-extern const char *apply_default_ignorewhitespace;
+extern char *apply_default_whitespace;
+extern char *apply_default_ignorewhitespace;
 extern const char *git_attributes_file;
 extern const char *git_hooks_path;
 extern int zlib_compression_level;
@@ -958,8 +962,8 @@ extern int protect_hfs;
 extern int protect_ntfs;
 extern const char *core_fsmonitor;
 
-int core_apply_sparse_checkout;
-int core_sparse_checkout_cone;
+extern int core_apply_sparse_checkout;
+extern int core_sparse_checkout_cone;
 
 /*
  * Include broken refs in all ref iterations, which will
@@ -1042,6 +1046,7 @@ struct repository_format {
 	int hash_algo;
 	char *work_tree;
 	struct string_list unknown_extensions;
+	struct string_list v1_only_extensions;
 };
 
 /*
@@ -1055,6 +1060,7 @@ struct repository_format {
 	.is_bare = -1, \
 	.hash_algo = GIT_HASH_SHA1, \
 	.unknown_extensions = STRING_LIST_INIT_DUP, \
+	.v1_only_extensions = STRING_LIST_INIT_DUP, \
 }
 
 /*
@@ -1086,8 +1092,10 @@ int verify_repository_format(const struct repository_format *format,
  * and die if it is a version we don't understand. Generally one would
  * set_git_dir() before calling this, and use it only for "are we in a valid
  * repo?".
+ *
+ * If successful and fmt is not NULL, fill fmt with data.
  */
-void check_repository_format(void);
+void check_repository_format(struct repository_format *fmt);
 
 #define MTIME_CHANGED	0x0001
 #define CTIME_CHANGED	0x0002
@@ -1116,100 +1124,6 @@ const char *repo_find_unique_abbrev(struct repository *r, const struct object_id
 #define find_unique_abbrev(oid, len) repo_find_unique_abbrev(the_repository, oid, len)
 int repo_find_unique_abbrev_r(struct repository *r, char *hex, const struct object_id *oid, int len);
 #define find_unique_abbrev_r(hex, oid, len) repo_find_unique_abbrev_r(the_repository, hex, oid, len)
-
-extern const struct object_id null_oid;
-
-static inline int hashcmp(const unsigned char *sha1, const unsigned char *sha2)
-{
-	/*
-	 * Teach the compiler that there are only two possibilities of hash size
-	 * here, so that it can optimize for this case as much as possible.
-	 */
-	if (the_hash_algo->rawsz == GIT_MAX_RAWSZ)
-		return memcmp(sha1, sha2, GIT_MAX_RAWSZ);
-	return memcmp(sha1, sha2, GIT_SHA1_RAWSZ);
-}
-
-static inline int oidcmp(const struct object_id *oid1, const struct object_id *oid2)
-{
-	return hashcmp(oid1->hash, oid2->hash);
-}
-
-static inline int hasheq(const unsigned char *sha1, const unsigned char *sha2)
-{
-	/*
-	 * We write this here instead of deferring to hashcmp so that the
-	 * compiler can properly inline it and avoid calling memcmp.
-	 */
-	if (the_hash_algo->rawsz == GIT_MAX_RAWSZ)
-		return !memcmp(sha1, sha2, GIT_MAX_RAWSZ);
-	return !memcmp(sha1, sha2, GIT_SHA1_RAWSZ);
-}
-
-static inline int oideq(const struct object_id *oid1, const struct object_id *oid2)
-{
-	return hasheq(oid1->hash, oid2->hash);
-}
-
-static inline int is_null_oid(const struct object_id *oid)
-{
-	return oideq(oid, &null_oid);
-}
-
-static inline void hashcpy(unsigned char *sha_dst, const unsigned char *sha_src)
-{
-	memcpy(sha_dst, sha_src, the_hash_algo->rawsz);
-}
-
-static inline void oidcpy(struct object_id *dst, const struct object_id *src)
-{
-	memcpy(dst->hash, src->hash, GIT_MAX_RAWSZ);
-}
-
-static inline struct object_id *oiddup(const struct object_id *src)
-{
-	struct object_id *dst = xmalloc(sizeof(struct object_id));
-	oidcpy(dst, src);
-	return dst;
-}
-
-static inline void hashclr(unsigned char *hash)
-{
-	memset(hash, 0, the_hash_algo->rawsz);
-}
-
-static inline void oidclr(struct object_id *oid)
-{
-	memset(oid->hash, 0, GIT_MAX_RAWSZ);
-}
-
-static inline void oidread(struct object_id *oid, const unsigned char *hash)
-{
-	memcpy(oid->hash, hash, the_hash_algo->rawsz);
-}
-
-static inline int is_empty_blob_sha1(const unsigned char *sha1)
-{
-	return hasheq(sha1, the_hash_algo->empty_blob->hash);
-}
-
-static inline int is_empty_blob_oid(const struct object_id *oid)
-{
-	return oideq(oid, the_hash_algo->empty_blob);
-}
-
-static inline int is_empty_tree_sha1(const unsigned char *sha1)
-{
-	return hasheq(sha1, the_hash_algo->empty_tree->hash);
-}
-
-static inline int is_empty_tree_oid(const struct object_id *oid)
-{
-	return oideq(oid, the_hash_algo->empty_tree);
-}
-
-const char *empty_tree_oid_hex(void);
-const char *empty_blob_oid_hex(void);
 
 /* set default permissions by passing mode arguments to open(2) */
 int git_mkstemps_mode(char *pattern, int suffix_len, int mode);
@@ -1249,7 +1163,11 @@ int adjust_shared_perm(const char *path);
  * safe_create_leading_directories() temporarily changes path while it
  * is working but restores it before returning.
  * safe_create_leading_directories_const() doesn't modify path, even
- * temporarily.
+ * temporarily. Both these variants adjust the permissions of the
+ * created directories to honor core.sharedRepository, so they are best
+ * suited for files inside the git dir. For working tree files, use
+ * safe_create_leading_directories_no_share() instead, as it ignores
+ * the core.sharedRepository setting.
  */
 enum scld_error {
 	SCLD_OK = 0,
@@ -1260,6 +1178,7 @@ enum scld_error {
 };
 enum scld_error safe_create_leading_directories(char *path);
 enum scld_error safe_create_leading_directories_const(const char *path);
+enum scld_error safe_create_leading_directories_no_share(char *path);
 
 /*
  * Callback function for raceproof_create_file(). This function is
@@ -1314,8 +1233,8 @@ static inline int is_absolute_path(const char *path)
 int is_directory(const char *);
 char *strbuf_realpath(struct strbuf *resolved, const char *path,
 		      int die_on_error);
-const char *real_path(const char *path);
-const char *real_path_if_valid(const char *path);
+char *strbuf_realpath_forgiving(struct strbuf *resolved, const char *path,
+				int die_on_error);
 char *real_pathdup(const char *path, int die_on_error);
 const char *absolute_path(const char *path);
 char *absolute_pathdup(const char *path);
@@ -1364,7 +1283,8 @@ int git_open_cloexec(const char *name, int flags);
 int unpack_loose_header(git_zstream *stream, unsigned char *map, unsigned long mapsize, void *buffer, unsigned long bufsiz);
 int parse_loose_header(const char *hdr, unsigned long *sizep);
 
-int check_object_signature(const struct object_id *oid, void *buf, unsigned long size, const char *type);
+int check_object_signature(struct repository *r, const struct object_id *oid,
+			   void *buf, unsigned long size, const char *type);
 
 int finalize_object_file(const char *tmpfile, const char *filename);
 
@@ -1481,6 +1401,9 @@ int set_disambiguate_hint_config(const char *var, const char *value);
 int get_sha1_hex(const char *hex, unsigned char *sha1);
 int get_oid_hex(const char *hex, struct object_id *sha1);
 
+/* Like get_oid_hex, but for an arbitrary hash algorithm. */
+int get_oid_hex_algop(const char *hex, struct object_id *oid, const struct git_hash_algo *algop);
+
 /*
  * Read `len` pairs of hexadecimal digits from `hex` and write the
  * values to `binary` as `len` bytes. Return 0 on success, or -1 if
@@ -1516,6 +1439,20 @@ char *oid_to_hex(const struct object_id *oid);						/* same static buffer */
  */
 int parse_oid_hex(const char *hex, struct object_id *oid, const char **end);
 
+/* Like parse_oid_hex, but for an arbitrary hash algorithm. */
+int parse_oid_hex_algop(const char *hex, struct object_id *oid, const char **end,
+			const struct git_hash_algo *algo);
+
+
+/*
+ * These functions work like get_oid_hex and parse_oid_hex, but they will parse
+ * a hex value for any algorithm. The algorithm is detected based on the length
+ * and the algorithm in use is returned. If this is not a hex object ID in any
+ * algorithm, returns GIT_HASH_UNKNOWN.
+ */
+int get_oid_hex_any(const char *hex, struct object_id *oid);
+int parse_oid_hex_any(const char *hex, struct object_id *oid, const char **end);
+
 /*
  * This reads short-hand syntax that not only evaluates to a commit
  * object name, but also can act as if the end user spelled the name
@@ -1536,21 +1473,32 @@ int parse_oid_hex(const char *hex, struct object_id *oid, const char **end);
  *
  * If the input was ok but there are not N branch switches in the
  * reflog, it returns 0.
- *
- * If "allowed" is non-zero, it is a treated as a bitfield of allowable
- * expansions: local branches ("refs/heads/"), remote branches
- * ("refs/remotes/"), or "HEAD". If no "allowed" bits are set, any expansion is
- * allowed, even ones to refs outside of those namespaces.
  */
 #define INTERPRET_BRANCH_LOCAL (1<<0)
 #define INTERPRET_BRANCH_REMOTE (1<<1)
 #define INTERPRET_BRANCH_HEAD (1<<2)
+struct interpret_branch_name_options {
+	/*
+	 * If "allowed" is non-zero, it is a treated as a bitfield of allowable
+	 * expansions: local branches ("refs/heads/"), remote branches
+	 * ("refs/remotes/"), or "HEAD". If no "allowed" bits are set, any expansion is
+	 * allowed, even ones to refs outside of those namespaces.
+	 */
+	unsigned allowed;
+
+	/*
+	 * If ^{upstream} or ^{push} (or equivalent) is requested, and the
+	 * branch in question does not have such a reference, return -1 instead
+	 * of die()-ing.
+	 */
+	unsigned nonfatal_dangling_mark : 1;
+};
 int repo_interpret_branch_name(struct repository *r,
 			       const char *str, int len,
 			       struct strbuf *buf,
-			       unsigned allowed);
-#define interpret_branch_name(str, len, buf, allowed) \
-	repo_interpret_branch_name(the_repository, str, len, buf, allowed)
+			       const struct interpret_branch_name_options *options);
+#define interpret_branch_name(str, len, buf, options) \
+	repo_interpret_branch_name(the_repository, str, len, buf, options)
 
 int validate_headref(const char *ref);
 
@@ -1679,6 +1627,7 @@ struct checkout {
 	const char *base_dir;
 	int base_dir_len;
 	struct delayed_checkout *delayed_checkout;
+	struct checkout_metadata meta;
 	unsigned force:1,
 		 quiet:1,
 		 not_new:1,
@@ -1713,6 +1662,7 @@ int has_symlink_leading_path(const char *name, int len);
 int threaded_has_symlink_leading_path(struct cache_def *, const char *, int);
 int check_leading_path(const char *name, int len);
 int has_dirs_only_path(const char *name, int len, int prefix_len);
+void invalidate_lstat_cache(void);
 void schedule_dir_for_removal(const char *name, int len);
 void remove_scheduled_dirs(void);
 
@@ -1927,7 +1877,6 @@ int stat_validity_check(struct stat_validity *sv, const char *path);
 void stat_validity_update(struct stat_validity *sv, int fd);
 
 int versioncmp(const char *s1, const char *s2);
-void sleep_millisec(int millisec);
 
 /*
  * Create a directory and (if share is nonzero) adjust its permissions

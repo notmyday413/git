@@ -5,6 +5,9 @@
 
 test_description='Test git stash'
 
+GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
+export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
+
 . ./test-lib.sh
 
 diff_cmp () {
@@ -220,14 +223,14 @@ test_expect_success 'stash branch' '
 	git commit file -m second &&
 	git stash branch stashbranch &&
 	test refs/heads/stashbranch = $(git symbolic-ref HEAD) &&
-	test $(git rev-parse HEAD) = $(git rev-parse master^) &&
+	test $(git rev-parse HEAD) = $(git rev-parse main^) &&
 	git diff --cached >output &&
 	diff_cmp expect output &&
 	git diff >output &&
 	diff_cmp expect1 output &&
 	git add file &&
 	git commit -m alternate\ second &&
-	git diff master..stashbranch >output &&
+	git diff main..stashbranch >output &&
 	diff_cmp output expect2 &&
 	test 0 = $(git stash list | wc -l)
 '
@@ -283,6 +286,11 @@ test_expect_success 'stash --no-keep-index' '
 	git add file2 &&
 	git stash --no-keep-index &&
 	test bar,bar2 = $(cat file),$(cat file2)
+'
+
+test_expect_success 'dont assume push with non-option args' '
+	test_must_fail git stash -q drop 2>err &&
+	test_i18ngrep -e "subcommand wasn'\''t specified; '\''push'\'' can'\''t be assumed due to unexpected token '\''drop'\''" err
 '
 
 test_expect_success 'stash --invalid-option' '
@@ -515,7 +523,7 @@ test_expect_success 'stash branch - no stashes on stack, stash-like argument' '
 	STASH_ID=$(git stash create) &&
 	git reset --hard &&
 	git stash branch stash-branch ${STASH_ID} &&
-	test_when_finished "git reset --hard HEAD && git checkout master &&
+	test_when_finished "git reset --hard HEAD && git checkout main &&
 	git branch -D stash-branch" &&
 	test $(git ls-files --modified | wc -l) -eq 1
 '
@@ -531,7 +539,7 @@ test_expect_success 'stash branch - stashes on stack, stash-like argument' '
 	STASH_ID=$(git stash create) &&
 	git reset --hard &&
 	git stash branch stash-branch ${STASH_ID} &&
-	test_when_finished "git reset --hard HEAD && git checkout master &&
+	test_when_finished "git reset --hard HEAD && git checkout main &&
 	git branch -D stash-branch" &&
 	test $(git ls-files --modified | wc -l) -eq 1
 '
@@ -556,7 +564,7 @@ test_expect_success 'stash show format defaults to --stat' '
 	 1 file changed, 1 insertion(+)
 	EOF
 	git stash show ${STASH_ID} >actual &&
-	test_i18ncmp expected actual
+	test_cmp expected actual
 '
 
 test_expect_success 'stash show - stashes on stack, stash-like argument' '
@@ -733,7 +741,7 @@ test_expect_success 'valid ref of the form "n", n < N' '
 	git stash &&
 	git stash show 0 &&
 	git stash branch tmp 0 &&
-	git checkout master &&
+	git checkout main &&
 	git stash &&
 	git stash apply 0 &&
 	git reset --hard &&
@@ -750,7 +758,7 @@ test_expect_success 'branch: do not drop the stash if the branch exists' '
 	git commit -m initial &&
 	echo bar >file &&
 	git stash &&
-	test_must_fail git stash branch master stash@{0} &&
+	test_must_fail git stash branch main stash@{0} &&
 	git rev-parse stash@{0} --
 '
 
@@ -763,7 +771,7 @@ test_expect_success 'branch: should not drop the stash if the apply fails' '
 	echo bar >file &&
 	git stash &&
 	echo baz >file &&
-	test_when_finished "git checkout master" &&
+	test_when_finished "git checkout main" &&
 	test_must_fail git stash branch new_branch stash@{0} &&
 	git rev-parse stash@{0} --
 '
@@ -784,7 +792,7 @@ test_expect_success 'apply: show same status as git status (relative to ./)' '
 		git stash apply
 	) |
 	sed -e 1d >actual && # drop "Saved..."
-	test_i18ncmp expect actual
+	test_cmp expect actual
 '
 
 cat >expect <<EOF
@@ -897,7 +905,7 @@ test_expect_success 'push -m shows right message' '
 	>foo &&
 	git add foo &&
 	git stash push -m "test message" &&
-	echo "stash@{0}: On master: test message" >expect &&
+	echo "stash@{0}: On main: test message" >expect &&
 	git stash list -1 >actual &&
 	test_cmp expect actual
 '
@@ -906,7 +914,7 @@ test_expect_success 'push -m also works without space' '
 	>foo &&
 	git add foo &&
 	git stash push -m"unspaced test message" &&
-	echo "stash@{0}: On master: unspaced test message" >expect &&
+	echo "stash@{0}: On main: unspaced test message" >expect &&
 	git stash list -1 >actual &&
 	test_cmp expect actual
 '
@@ -963,7 +971,7 @@ test_expect_success 'push -mfoo uses right message' '
 	>foo &&
 	git add foo &&
 	git stash push -m"test mfoo" &&
-	echo "stash@{0}: On master: test mfoo" >expect &&
+	echo "stash@{0}: On main: test mfoo" >expect &&
 	git stash list -1 >actual &&
 	test_cmp expect actual
 '
@@ -972,7 +980,7 @@ test_expect_success 'push --message foo is synonym for -mfoo' '
 	>foo &&
 	git add foo &&
 	git stash push --message "test message foo" &&
-	echo "stash@{0}: On master: test message foo" >expect &&
+	echo "stash@{0}: On main: test message foo" >expect &&
 	git stash list -1 >actual &&
 	test_cmp expect actual
 '
@@ -981,7 +989,7 @@ test_expect_success 'push --message=foo is synonym for -mfoo' '
 	>foo &&
 	git add foo &&
 	git stash push --message="test message=foo" &&
-	echo "stash@{0}: On master: test message=foo" >expect &&
+	echo "stash@{0}: On main: test message=foo" >expect &&
 	git stash list -1 >actual &&
 	test_cmp expect actual
 '
@@ -990,7 +998,7 @@ test_expect_success 'push -m shows right message' '
 	>foo &&
 	git add foo &&
 	git stash push -m "test m foo" &&
-	echo "stash@{0}: On master: test m foo" >expect &&
+	echo "stash@{0}: On main: test m foo" >expect &&
 	git stash list -1 >actual &&
 	test_cmp expect actual
 '
@@ -999,7 +1007,7 @@ test_expect_success 'create stores correct message' '
 	>foo &&
 	git add foo &&
 	STASH_ID=$(git stash create "create test message") &&
-	echo "On master: create test message" >expect &&
+	echo "On main: create test message" >expect &&
 	git show --pretty=%s -s ${STASH_ID} >actual &&
 	test_cmp expect actual
 '
@@ -1008,13 +1016,13 @@ test_expect_success 'create with multiple arguments for the message' '
 	>foo &&
 	git add foo &&
 	STASH_ID=$(git stash create test untracked) &&
-	echo "On master: test untracked" >expect &&
+	echo "On main: test untracked" >expect &&
 	git show --pretty=%s -s ${STASH_ID} >actual &&
 	test_cmp expect actual
 '
 
 test_expect_success 'create in a detached state' '
-	test_when_finished "git checkout master" &&
+	test_when_finished "git checkout main" &&
 	git checkout HEAD~1 &&
 	>foo &&
 	git add foo &&
@@ -1106,7 +1114,7 @@ test_expect_success 'stash push -p with pathspec shows no changes only once' '
 	git stash push -p foo >actual &&
 	echo "No local changes to save" >expect &&
 	git reset --hard HEAD~ &&
-	test_i18ncmp expect actual
+	test_cmp expect actual
 '
 
 test_expect_success 'push <pathspec>: show no changes when there are none' '
@@ -1116,7 +1124,7 @@ test_expect_success 'push <pathspec>: show no changes when there are none' '
 	git stash push foo >actual &&
 	echo "No local changes to save" >expect &&
 	git reset --hard HEAD~ &&
-	test_i18ncmp expect actual
+	test_cmp expect actual
 '
 
 test_expect_success 'push: <pathspec> not in the repository errors out' '
@@ -1205,7 +1213,7 @@ test_expect_success 'stash -- <subdir> works with binary files' '
 	git reset &&
 	>subdir/untracked &&
 	>subdir/tracked &&
-	cp "$TEST_DIRECTORY"/diff-lib/test-binary-1.png subdir/tracked-binary &&
+	cp "$TEST_DIRECTORY"/lib-diff/test-binary-1.png subdir/tracked-binary &&
 	git add subdir/tracked* &&
 	git stash -- subdir/ &&
 	test_path_is_missing subdir/tracked &&
@@ -1283,6 +1291,20 @@ test_expect_success 'stash handles skip-worktree entries nicely' '
 	git stash &&
 
 	git rev-parse --verify refs/stash:A.t
+'
+
+test_expect_success 'stash -c stash.useBuiltin=false warning ' '
+	expected="stash.useBuiltin support has been removed" &&
+
+	git -c stash.useBuiltin=false stash 2>err &&
+	test_i18ngrep "$expected" err &&
+	env GIT_TEST_STASH_USE_BUILTIN=false git stash 2>err &&
+	test_i18ngrep "$expected" err &&
+
+	git -c stash.useBuiltin=true stash 2>err &&
+	test_must_be_empty err &&
+	env GIT_TEST_STASH_USE_BUILTIN=true git stash 2>err &&
+	test_must_be_empty err
 '
 
 test_done

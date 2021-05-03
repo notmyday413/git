@@ -15,7 +15,7 @@ commit_msg_is () {
 
 	printf "%s" "$(git log --pretty=format:%s%b -1)" >"$actual" &&
 	printf "%s" "$1" >"$expect" &&
-	test_i18ncmp "$expect" "$actual"
+	test_cmp "$expect" "$actual"
 }
 
 # A sanity check to see if commit is working at all.
@@ -356,7 +356,7 @@ test_expect_success 'new line found before status message in commit template' '
 	touch commit-template-check &&
 	git add commit-template-check &&
 	GIT_EDITOR="cat >editor-input" git commit --untracked-files=no --allow-empty-message &&
-	test_i18ncmp expected-template editor-input
+	test_cmp expected-template editor-input
 '
 
 test_expect_success 'setup empty commit with unstaged rename and copy' '
@@ -380,6 +380,15 @@ test_expect_success 'check commit with unstaged rename and copy' '
 
 		test_must_fail git -c diff.renames=copy commit
 	)
+'
+
+test_expect_success 'commit without staging files fails and displays hints' '
+	echo "initial" >file &&
+	git add file &&
+	git commit -m initial &&
+	echo "changes" >>file &&
+	test_must_fail git commit -m update >actual &&
+	test_i18ngrep "no changes added to commit (use \"git add\" and/or \"git commit -a\")" actual
 '
 
 test_done

@@ -21,8 +21,8 @@ void open_in_gdb(void)
 	static struct child_process cp = CHILD_PROCESS_INIT;
 	extern char *_pgmptr;
 
-	argv_array_pushl(&cp.args, "mintty", "gdb", NULL);
-	argv_array_pushf(&cp.args, "--pid=%d", getpid());
+	strvec_pushl(&cp.args, "mintty", "gdb", NULL);
+	strvec_pushf(&cp.args, "--pid=%d", getpid());
 	cp.clean_on_exit = 1;
 	if (start_command(&cp) < 0)
 		die_errno("Could not start gdb");
@@ -508,6 +508,9 @@ int mingw_unlink(const char *pathname)
 	if (xutftowcs_long_path(wpathname, pathname) < 0)
 		return -1;
 
+	if (DeleteFileW(wpathname))
+		return 0;
+
 	do {
 		/* read-only files cannot be removed */
 		_wchmod(wpathname, 0666);
@@ -557,8 +560,10 @@ int mingw_rmdir(const char *pathname)
 		return -1;
 
 	do {
-		if (!_wrmdir(wpathname))
+		if (!_wrmdir(wpathname)) {
+			invalidate_lstat_cache();
 			return 0;
+		}
 		if (!is_file_in_use_error(GetLastError()))
 			errno = err_win_to_posix(GetLastError());
 		if (errno != EACCES)
@@ -672,16 +677,18 @@ static int mingw_open_append(wchar_t const *wfilename, int oflags, ...)
 			NULL, create, FILE_ATTRIBUTE_NORMAL, NULL);
 	if (handle == INVALID_HANDLE_VALUE) {
 		DWORD err = GetLastError();
+
 		/*
 		 * Some network storage solutions (e.g. Isilon) might return
 		 * ERROR_INVALID_PARAMETER instead of expected error
-		 * ERROR_PATH_NOT_FOUND, which results in a unknow error. If
-		 * so, the error is now forced to be an ERROR_PATH_NOT_FOUND
-		 * error instead.
+		 * ERROR_PATH_NOT_FOUND, which results in an unknown error. If
+		 * so, let's turn the error to ERROR_PATH_NOT_FOUND instead.
 		 */
 		if (err == ERROR_INVALID_PARAMETER)
 			err = ERROR_PATH_NOT_FOUND;
-		return errno = err_win_to_posix(err), -1;
+
+		errno = err_win_to_posix(err);
+		return -1;
 	}
 
 	/*
@@ -966,10 +973,14 @@ static int has_valid_directory_prefix(wchar_t *wfilename)
 	return 1;
 }
 
+static int readlink_1(const WCHAR *wpath, BOOL fail_on_unknown_tag,
+		      char *tmpbuf, int *plen, DWORD *ptag);
+
 int mingw_lstat(const char *file_name, struct stat *buf)
 {
 	WIN32_FILE_ATTRIBUTE_DATA fdata;
-	WIN32_FIND_DATAW findbuf = { 0 };
+	DWORD reparse_tag = 0;
+	int link_len = 0;
 	wchar_t wfilename[MAX_LONG_PATH];
 	int wlen = xutftowcs_long_path(wfilename, file_name);
 	if (wlen < 0)
@@ -984,20 +995,21 @@ int mingw_lstat(const char *file_name, struct stat *buf)
 	}
 
 	if (GetFileAttributesExW(wfilename, GetFileExInfoStandard, &fdata)) {
-		/* for reparse points, use FindFirstFile to get the reparse tag */
+		/* for reparse points, get the link tag and length */
 		if (fdata.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
-			HANDLE handle = FindFirstFileW(wfilename, &findbuf);
-			if (handle == INVALID_HANDLE_VALUE)
-				goto error;
-			FindClose(handle);
+			char tmpbuf[MAX_LONG_PATH];
+
+			if (readlink_1(wfilename, FALSE, tmpbuf, &link_len,
+				       &reparse_tag) < 0)
+				return -1;
 		}
 		buf->st_ino = 0;
 		buf->st_gid = 0;
 		buf->st_uid = 0;
 		buf->st_nlink = 1;
 		buf->st_mode = file_attr_to_st_mode(fdata.dwFileAttributes,
-				findbuf.dwReserved0, file_name);
-		buf->st_size = S_ISLNK(buf->st_mode) ? MAX_LONG_PATH :
+				reparse_tag, file_name);
+		buf->st_size = S_ISLNK(buf->st_mode) ? link_len :
 			fdata.nFileSizeLow | (((off_t) fdata.nFileSizeHigh) << 32);
 		buf->st_dev = buf->st_rdev = 0; /* not used by Git */
 		filetime_to_timespec(&(fdata.ftLastAccessTime), &(buf->st_atim));
@@ -1005,7 +1017,7 @@ int mingw_lstat(const char *file_name, struct stat *buf)
 		filetime_to_timespec(&(fdata.ftCreationTime), &(buf->st_ctim));
 		return 0;
 	}
-error:
+
 	switch (GetLastError()) {
 	case ERROR_ACCESS_DENIED:
 	case ERROR_SHARING_VIOLATION:
@@ -1070,7 +1082,19 @@ int mingw_stat(const char *file_name, struct stat *buf)
 			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
 			OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
 	if (hnd == INVALID_HANDLE_VALUE) {
-		errno = err_win_to_posix(GetLastError());
+		DWORD err = GetLastError();
+
+		if (err == ERROR_ACCESS_DENIED &&
+		    !mingw_lstat(file_name, buf) &&
+		    !S_ISLNK(buf->st_mode))
+			/*
+			 * POSIX semantics state to still try to fill
+			 * information, even if permission is denied to create
+			 * a file handle.
+			 */
+			return 0;
+
+		errno = err_win_to_posix(err);
 		return -1;
 	}
 	result = get_file_info_by_handle(hnd, buf);
@@ -1164,7 +1188,16 @@ revert_attrs:
 size_t mingw_strftime(char *s, size_t max,
 		      const char *format, const struct tm *tm)
 {
-	size_t ret = strftime(s, max, format, tm);
+	/* a pointer to the original strftime in case we can't find the UCRT version */
+	static size_t (*fallback)(char *, size_t, const char *, const struct tm *) = strftime;
+	size_t ret;
+	DECLARE_PROC_ADDR(ucrtbase.dll, size_t, strftime, char *, size_t,
+		const char *, const struct tm *);
+
+	if (INIT_PROC_ADDR(strftime))
+		ret = strftime(s, max, format, tm);
+	else
+		ret = fallback(s, max, format, tm);
 
 	if (!ret && errno == EINVAL)
 		die("invalid strftime format: '%s'", format);
@@ -1256,33 +1289,97 @@ struct tm *localtime_r(const time_t *timep, struct tm *result)
 	return NULL;
 }
 
+char *mingw_strbuf_realpath(struct strbuf *resolved, const char *path)
+{
+	wchar_t wpath[MAX_PATH];
+	HANDLE h;
+	DWORD ret;
+	int len;
+	const char *last_component = NULL;
+
+	if (xutftowcs_path(wpath, path) < 0)
+		return NULL;
+
+	h = CreateFileW(wpath, 0,
+			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+			OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+
+	/*
+	 * strbuf_realpath() allows the last path component to not exist. If
+	 * that is the case, now it's time to try without last component.
+	 */
+	if (h == INVALID_HANDLE_VALUE &&
+	    GetLastError() == ERROR_FILE_NOT_FOUND) {
+		/* cut last component off of `wpath` */
+		wchar_t *p = wpath + wcslen(wpath);
+
+		while (p != wpath)
+			if (*(--p) == L'/' || *p == L'\\')
+				break; /* found start of last component */
+
+		if (p != wpath && (last_component = find_last_dir_sep(path))) {
+			last_component++; /* skip directory separator */
+			*p = L'\0';
+			h = CreateFileW(wpath, 0, FILE_SHARE_READ |
+					FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+					NULL, OPEN_EXISTING,
+					FILE_FLAG_BACKUP_SEMANTICS, NULL);
+		}
+	}
+
+	if (h == INVALID_HANDLE_VALUE)
+		return NULL;
+
+	ret = GetFinalPathNameByHandleW(h, wpath, ARRAY_SIZE(wpath), 0);
+	CloseHandle(h);
+	if (!ret || ret >= ARRAY_SIZE(wpath))
+		return NULL;
+
+	len = wcslen(wpath) * 3;
+	strbuf_grow(resolved, len);
+	len = xwcstoutf(resolved->buf, normalize_ntpath(wpath), len);
+	if (len < 0)
+		return NULL;
+	resolved->len = len;
+
+	if (last_component) {
+		/* Use forward-slash, like `normalize_ntpath()` */
+		strbuf_addch(resolved, '/');
+		strbuf_addstr(resolved, last_component);
+	}
+
+	return resolved->buf;
+
+}
+
 char *mingw_getcwd(char *pointer, int len)
 {
 	wchar_t cwd[MAX_PATH], wpointer[MAX_PATH];
 	DWORD ret = GetCurrentDirectoryW(ARRAY_SIZE(cwd), cwd);
+	HANDLE hnd;
 
 	if (!ret || ret >= ARRAY_SIZE(cwd)) {
 		errno = ret ? ENAMETOOLONG : err_win_to_posix(GetLastError());
 		return NULL;
 	}
-	ret = GetLongPathNameW(cwd, wpointer, ARRAY_SIZE(wpointer));
-	if (!ret && GetLastError() == ERROR_ACCESS_DENIED) {
-		HANDLE hnd = CreateFileW(cwd, 0,
-			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-			OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-		if (hnd == INVALID_HANDLE_VALUE)
-			return NULL;
+	hnd = CreateFileW(cwd, 0,
+			  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+			  OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+	if (hnd != INVALID_HANDLE_VALUE) {
 		ret = GetFinalPathNameByHandleW(hnd, wpointer, ARRAY_SIZE(wpointer), 0);
 		CloseHandle(hnd);
-		if (!ret || ret >= ARRAY_SIZE(wpointer))
-			return NULL;
+		if (!ret || ret >= ARRAY_SIZE(wpointer)) {
+			ret = GetLongPathNameW(cwd, wpointer, ARRAY_SIZE(wpointer));
+			if (!ret || ret >= ARRAY_SIZE(wpointer)) {
+				errno = ret ? ENAMETOOLONG : err_win_to_posix(GetLastError());
+				return NULL;
+			}
+		}
 		if (xwcstoutf(pointer, normalize_ntpath(wpointer), len) < 0)
 			return NULL;
 		return pointer;
 	}
-	if (!ret || ret >= ARRAY_SIZE(wpointer))
-		return NULL;
-	if (xwcstoutf(pointer, wpointer, len) < 0)
+	if (xwcstoutf(pointer, cwd, len) < 0)
 		return NULL;
 	convert_slashes(pointer);
 	return pointer;
@@ -1384,7 +1481,7 @@ static const char *quote_arg_msys2(const char *arg)
 
 static const char *parse_interpreter(const char *cmd)
 {
-	static char buf[100];
+	static char buf[MAX_PATH];
 	char *p, *opt;
 	int n, fd;
 
@@ -1470,7 +1567,7 @@ static char *is_busybox_applet(const char *cmd)
 		struct strbuf buf = STRBUF_INIT;
 		char *p;
 
-		argv_array_pushl(&cp.args, busybox_path, "--help", NULL);
+		strvec_pushl(&cp.args, busybox_path, "--help", NULL);
 
 		if (capture_command(&cp, &buf, 2048)) {
 			string_list_append(&applets, "");
@@ -1513,7 +1610,7 @@ static char *path_lookup(const char *cmd, int exe_only)
 	int len = strlen(cmd);
 	int isexe = len >= 4 && !strcasecmp(cmd+len-4, ".exe");
 
-	if (strchr(cmd, '/') || strchr(cmd, '\\'))
+	if (strpbrk(cmd, "/\\"))
 		return xstrdup(cmd);
 
 	path = mingw_getenv("PATH");
@@ -2913,17 +3010,13 @@ typedef struct _REPARSE_DATA_BUFFER {
 } REPARSE_DATA_BUFFER, *PREPARSE_DATA_BUFFER;
 #endif
 
-int readlink(const char *path, char *buf, size_t bufsiz)
+static int readlink_1(const WCHAR *wpath, BOOL fail_on_unknown_tag,
+		      char *tmpbuf, int *plen, DWORD *ptag)
 {
 	HANDLE handle;
-	WCHAR wpath[MAX_LONG_PATH], *wbuf;
+	WCHAR *wbuf;
 	REPARSE_DATA_BUFFER *b = alloca(MAXIMUM_REPARSE_DATA_BUFFER_SIZE);
 	DWORD dummy;
-	char tmpbuf[MAX_LONG_PATH];
-	int len;
-
-	if (xutftowcs_long_path(wpath, path) < 0)
-		return -1;
 
 	/* read reparse point data */
 	handle = CreateFileW(wpath, 0,
@@ -2943,7 +3036,7 @@ int readlink(const char *path, char *buf, size_t bufsiz)
 	CloseHandle(handle);
 
 	/* get target path for symlinks or mount points (aka 'junctions') */
-	switch (b->ReparseTag) {
+	switch ((*ptag = b->ReparseTag)) {
 	case IO_REPARSE_TAG_SYMLINK:
 		wbuf = (WCHAR*) (((char*) b->SymbolicLinkReparseBuffer.PathBuffer)
 				+ b->SymbolicLinkReparseBuffer.SubstituteNameOffset);
@@ -2957,9 +3050,33 @@ int readlink(const char *path, char *buf, size_t bufsiz)
 				+ b->MountPointReparseBuffer.SubstituteNameLength) = 0;
 		break;
 	default:
-		errno = EINVAL;
-		return -1;
+		if (fail_on_unknown_tag) {
+			errno = EINVAL;
+			return -1;
+		} else {
+			*plen = MAX_LONG_PATH;
+			return 0;
+		}
 	}
+
+	if ((*plen =
+	     xwcstoutf(tmpbuf, normalize_ntpath(wbuf), MAX_LONG_PATH)) <  0)
+		return -1;
+	return 0;
+}
+
+int readlink(const char *path, char *buf, size_t bufsiz)
+{
+	WCHAR wpath[MAX_LONG_PATH];
+	char tmpbuf[MAX_LONG_PATH];
+	int len;
+	DWORD tag;
+
+	if (xutftowcs_long_path(wpath, path) < 0)
+		return -1;
+
+	if (readlink_1(wpath, TRUE, tmpbuf, &len, &tag) < 0)
+		return -1;
 
 	/*
 	 * Adapt to strange readlink() API: Copy up to bufsiz *bytes*, potentially
@@ -2968,8 +3085,6 @@ int readlink(const char *path, char *buf, size_t bufsiz)
 	 * so convert to a (hopefully large enough) temporary buffer, then memcpy
 	 * the requested number of bytes (including '\0' for robustness).
 	 */
-	if ((len = xwcstoutf(tmpbuf, normalize_ntpath(wbuf), MAX_LONG_PATH)) < 0)
-		return -1;
 	memcpy(buf, tmpbuf, min(bufsiz, len + 1));
 	return min(bufsiz, len);
 }
@@ -3135,6 +3250,59 @@ int xwcstoutf(char *utf, const wchar_t *wcs, size_t utflen)
 	return -1;
 }
 
+#ifdef ENSURE_MSYSTEM_IS_SET
+static size_t append_system_bin_dirs(char *path, size_t size)
+{
+#if !defined(RUNTIME_PREFIX) || !defined(HAVE_WPGMPTR)
+	return 0;
+#else
+	char prefix[32768];
+	const char *slash;
+	size_t len = xwcstoutf(prefix, _wpgmptr, sizeof(prefix)), off = 0;
+
+	if (len == 0 || len >= sizeof(prefix) ||
+	    !(slash = find_last_dir_sep(prefix)))
+		return 0;
+	/* strip trailing `git.exe` */
+	len = slash - prefix;
+
+	/* strip trailing `cmd` or `mingw64\bin` or `mingw32\bin` or `bin` or `libexec\git-core` */
+	if (strip_suffix_mem(prefix, &len, "\\mingw64\\libexec\\git-core") ||
+	    strip_suffix_mem(prefix, &len, "\\mingw64\\bin"))
+		off += xsnprintf(path + off, size - off,
+				 "%.*s\\mingw64\\bin;", (int)len, prefix);
+	else if (strip_suffix_mem(prefix, &len, "\\mingw32\\libexec\\git-core") ||
+		 strip_suffix_mem(prefix, &len, "\\mingw32\\bin"))
+		off += xsnprintf(path + off, size - off,
+				 "%.*s\\mingw32\\bin;", (int)len, prefix);
+	else if (strip_suffix_mem(prefix, &len, "\\cmd") ||
+		 strip_suffix_mem(prefix, &len, "\\bin") ||
+		 strip_suffix_mem(prefix, &len, "\\libexec\\git-core"))
+		off += xsnprintf(path + off, size - off,
+				 "%.*s\\mingw%d\\bin;", (int)len, prefix,
+				 (int)(sizeof(void *) * 8));
+	else
+		return 0;
+
+	off += xsnprintf(path + off, size - off,
+			 "%.*s\\usr\\bin;", (int)len, prefix);
+	return off;
+#endif
+}
+#endif
+
+static int is_system32_path(const char *path)
+{
+	WCHAR system32[MAX_LONG_PATH], wpath[MAX_LONG_PATH];
+
+	if (xutftowcs_long_path(wpath, path) < 0 ||
+	    !GetSystemDirectoryW(system32, ARRAY_SIZE(system32)) ||
+	    _wcsicmp(system32, wpath))
+		return 0;
+
+	return 1;
+}
+
 static void setup_windows_environment(void)
 {
 	char *tmp = getenv("TMPDIR");
@@ -3175,7 +3343,8 @@ static void setup_windows_environment(void)
 			strbuf_addstr(&buf, tmp);
 			if ((tmp = getenv("HOMEPATH"))) {
 				strbuf_addstr(&buf, tmp);
-				if (is_directory(buf.buf))
+				if (!is_system32_path(buf.buf) &&
+				    is_directory(buf.buf))
 					setenv("HOME", buf.buf, 1);
 				else
 					tmp = NULL; /* use $USERPROFILE */
@@ -3187,6 +3356,37 @@ static void setup_windows_environment(void)
 			setenv("HOME", tmp, 1);
 	}
 
+	if (!getenv("PLINK_PROTOCOL"))
+		setenv("PLINK_PROTOCOL", "ssh", 0);
+
+#ifdef ENSURE_MSYSTEM_IS_SET
+	if (!(tmp = getenv("MSYSTEM")) || !tmp[0]) {
+		const char *home = getenv("HOME"), *path = getenv("PATH");
+		char buf[32768];
+		size_t off = 0;
+
+		xsnprintf(buf, sizeof(buf),
+			  "MINGW%d", (int)(sizeof(void *) * 8));
+		setenv("MSYSTEM", buf, 1);
+
+		if (home)
+			off += xsnprintf(buf + off, sizeof(buf) - off,
+					 "%s\\bin;", home);
+		off += append_system_bin_dirs(buf + off, sizeof(buf) - off);
+		if (path)
+			off += xsnprintf(buf + off, sizeof(buf) - off,
+					 "%s", path);
+		else if (off > 0)
+			buf[off - 1] = '\0';
+		else
+			buf[0] = '\0';
+		setenv("PATH", buf, 1);
+	}
+#endif
+
+	if (!getenv("LC_ALL") && !getenv("LC_CTYPE") && !getenv("LANG"))
+		setenv("LC_CTYPE", "C.UTF-8", 1);
+
 	/*
 	 * Change 'core.symlinks' default to false, unless native symlinks are
 	 * enabled in MSys2 (via 'MSYS=winsymlinks:nativestrict'). Thus we can
@@ -3195,9 +3395,6 @@ static void setup_windows_environment(void)
 	 */
 	if (!(tmp = getenv("MSYS")) || !strstr(tmp, "winsymlinks:nativestrict"))
 		has_symlinks = 0;
-
-	if (!getenv("LC_ALL") && !getenv("LC_CTYPE") && !getenv("LANG"))
-		setenv("LC_CTYPE", "C", 1);
 }
 
 int is_valid_win32_path(const char *path, int allow_literal_nul)
@@ -3235,12 +3432,14 @@ not_a_reserved_name:
 					continue;
 				}
 				break;
-			case 'c': case 'C': /* COM<N>, CON, CONIN$, CONOUT$ */
+			case 'c': case 'C':
+				/* COM1 ... COM9, CON, CONIN$, CONOUT$ */
 				if ((c = path[++i]) != 'o' && c != 'O')
 					goto not_a_reserved_name;
 				c = path[++i];
-				if (c == 'm' || c == 'M') { /* COM<N> */
-					if (!isdigit(path[++i]))
+				if (c == 'm' || c == 'M') { /* COM1 ... COM9 */
+					c = path[++i];
+					if (c < '1' || c > '9')
 						goto not_a_reserved_name;
 				} else if (c == 'n' || c == 'N') { /* CON */
 					c = path[i + 1];

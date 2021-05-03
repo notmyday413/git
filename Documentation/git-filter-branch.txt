@@ -467,9 +467,9 @@ impossible for a backward-compatible implementation to ever be fast:
 
 * In editing files, git-filter-branch by design checks out each and
   every commit as it existed in the original repo.  If your repo has
-  10\^5 files and 10\^5 commits, but each commit only modifies 5
-  files, then git-filter-branch will make you do 10\^10 modifications,
-  despite only having (at most) 5*10^5 unique blobs.
+  `10^5` files and `10^5` commits, but each commit only modifies five
+  files, then git-filter-branch will make you do `10^10` modifications,
+  despite only having (at most) `5*10^5` unique blobs.
 
 * If you try and cheat and try to make git-filter-branch only work on
   files modified in a commit, then two things happen
@@ -532,7 +532,7 @@ The https://github.com/newren/git-filter-repo/[git filter-repo] tool is
 an alternative to git-filter-branch which does not suffer from these
 performance problems or the safety problems (mentioned below). For those
 with existing tooling which relies upon git-filter-branch, 'git
-repo-filter' also provides
+filter-repo' also provides
 https://github.com/newren/git-filter-repo/blob/master/contrib/filter-repo-demos/filter-lamely[filter-lamely],
 a drop-in git-filter-branch replacement (with a few caveats).  While
 filter-lamely suffers from all the same safety issues as

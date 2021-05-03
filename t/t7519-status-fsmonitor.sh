@@ -32,11 +32,12 @@ write_integration_script () {
 		echo "$0: exactly 2 arguments expected"
 		exit 2
 	fi
-	if test "$1" != 1
+	if test "$1" != 2
 	then
 		echo "Unsupported core.fsmonitor hook version." >&2
 		exit 1
 	fi
+	printf "last_update_token\0"
 	printf "untracked\0"
 	printf "dir1/untracked\0"
 	printf "dir2/untracked\0"
@@ -107,6 +108,7 @@ EOF
 # test that "update-index --fsmonitor-valid" sets the fsmonitor valid bit
 test_expect_success 'update-index --fsmonitor-valid" sets the fsmonitor valid bit' '
 	write_script .git/hooks/fsmonitor-test<<-\EOF &&
+		printf "last_update_token\0"
 	EOF
 	git update-index --fsmonitor &&
 	git update-index --fsmonitor-valid dir1/modified &&
@@ -167,6 +169,7 @@ EOF
 # test that newly added files are marked valid
 test_expect_success 'newly added files are marked valid' '
 	write_script .git/hooks/fsmonitor-test<<-\EOF &&
+		printf "last_update_token\0"
 	EOF
 	git add new &&
 	git add dir1/new &&
@@ -207,6 +210,7 @@ EOF
 # test that *only* files returned by the integration script get flagged as invalid
 test_expect_success '*only* files returned by the integration script get flagged as invalid' '
 	write_script .git/hooks/fsmonitor-test<<-\EOF &&
+	printf "last_update_token\0"
 	printf "dir1/modified\0"
 	EOF
 	clean_repo &&
@@ -232,7 +236,7 @@ test_expect_success 'refresh_index() invalidates fsmonitor cache' '
 	git reset HEAD~1 &&
 	git status >actual &&
 	git -c core.fsmonitor= status >expect &&
-	test_i18ncmp expect actual
+	test_cmp expect actual
 '
 
 # test fsmonitor with and without preloadIndex
@@ -269,13 +273,14 @@ do
 			git add dir2/new &&
 			git status >actual &&
 			git -c core.fsmonitor= status >expect &&
-			test_i18ncmp expect actual
+			test_cmp expect actual
 		'
 
 		# Make sure it's actually skipping the check for modified and untracked
 		# (if enabled) files unless it is told about them.
 		test_expect_success "status doesn't detect unreported modifications" '
 			write_script .git/hooks/fsmonitor-test<<-\EOF &&
+			printf "last_update_token\0"
 			:>marker
 			EOF
 			clean_repo &&
